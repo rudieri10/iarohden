@@ -204,9 +204,21 @@ def process_table():
         except Exception:
             pass
 
-        # 2. Buscar amostra de dados (5000 registros) para treinamento profundo sem IA
-        # Aumentado para 5000 para maior precisão estatística e detecção de anomalias
-        cursor.execute(f'SELECT * FROM (SELECT * FROM {full_table_name}) WHERE ROWNUM <= 5000')
+        # 2. Amostragem Adaptativa e Estratificada
+        # Se a tabela for pequena (< 10k), pegamos tudo.
+        # Se for grande, pegamos uma amostra de até 10% (máx 25k) distribuída aleatoriamente pelo Oracle (SAMPLE)
+        if total_records <= 10000:
+            sample_query = f'SELECT * FROM {full_table_name}'
+            target_sample = total_records
+        else:
+            # Calcular porcentagem para o SAMPLE (ex: se quero 25k de 1M, a porcentagem é 2.5%)
+            target_sample = min(int(total_records * 0.1), 25000)
+            sample_percent = max(round((target_sample / total_records) * 100, 2), 0.01)
+            # SAMPLE(n) no Oracle pega uma amostra estatística de n% dos blocos/linhas
+            sample_query = f'SELECT * FROM (SELECT * FROM {full_table_name} SAMPLE({sample_percent})) WHERE ROWNUM <= {target_sample}'
+        
+        print(f"Buscando amostra adaptativa de {target_sample} registros para {table_name} (Total: {total_records})...")
+        cursor.execute(sample_query)
         cols = [col[0] for col in cursor.description]
         sample_rows = []
         for row in cursor.fetchall():

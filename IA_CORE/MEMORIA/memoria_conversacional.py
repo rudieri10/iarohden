@@ -16,6 +16,11 @@ class MemoriaConversacional:
     
     def __init__(self):
         self.init_memory_tables()
+        try:
+            from ..TRAINING.passive_learner import PassiveLearner
+            self.passive_learner = PassiveLearner()
+        except ImportError:
+            self.passive_learner = None
     
     def init_memory_tables(self):
         """Inicializa tabelas de memória conversacional"""
@@ -574,7 +579,13 @@ class MemoriaConversacional:
     
     def extract_learning_from_interaction(self, user_name, user_query, ai_response):
         """Extrai aprendizado automático da interação com análise de sentimento (otimizado)"""
-        # Detectar preferências de formato (apenas se claro)
+        # 1. Aprendizado Passivo Semântico (Novo sistema robusto)
+        try:
+            self.passive_learner.analyze_interaction(user_name, user_query, ai_response)
+        except Exception as e:
+            print(f"Erro no aprendizado passivo: {e}")
+
+        # 2. Detectar preferências de formato (legado/rápido)
         if 'tabela' in user_query.lower() and '|' in ai_response:
             self.learn_contextual_fact(user_name, "Prefere ver dados em formato de tabela", "preference", 3)
         

@@ -38,28 +38,37 @@ class TableTrainer:
             if col_data.get('insights'):
                 semantic_text += f"Insight {col_name}: {' '.join(col_data['insights'])}. "
 
-        print(f"Gerando vetor semântico para {table_name}...")
+        print(f"Gerando vetor semântico para {table_name} (3 tentativas)...")
         vector_blob = None
         vector_success = False
+        last_error = "Vetor retornado como Nulo"
         
-        try:
-            # Tentativa 1: Texto Completo (Insights + Colunas)
-            vector = self.vector_manager.generate_embedding(semantic_text)
-            
-            # Se falhar, tentativa 2: Texto Simplificado (Apenas Nome e Colunas)
-            if not vector:
-                print(f"Simplificando contexto para {table_name} e tentando novamente...")
-                simple_text = f"Tabela {table_name}. Colunas: {', '.join([c['name'] for c in columns])}"
-                vector = self.vector_manager.generate_embedding(simple_text)
-            
-            if vector:
-                vector_blob = self.vector_manager.vector_to_blob(vector)
-                vector_success = True
-        except Exception as e:
-            print(f"Erro na vetorização de {table_name}: {str(e)}")
+        # Estratégias de texto para as tentativas (da mais rica para a mais simples)
+        texts_to_try = [
+            semantic_text, # 1. Completo (Insights + Stats)
+            f"Tabela {table_name}. Descrição: {advanced_description[:500]}", # 2. Resumo curto
+            f"Tabela {table_name}. Colunas: {', '.join([c['name'] for c in columns])}" # 3. Apenas Schema
+        ]
+
+        for i, text in enumerate(texts_to_try):
+            try:
+                print(f"Tentativa {i+1}/3 de vetorização para {table_name}...")
+                vector = self.vector_manager.generate_embedding(text)
+                if vector:
+                    vector_blob = self.vector_manager.vector_to_blob(vector)
+                    vector_success = True
+                    print(f"✅ Vetorização concluída com sucesso na tentativa {i+1}.")
+                    break
+                else:
+                    print(f"Aviso: Tentativa {i+1} falhou (servidor não retornou vetor).")
+            except Exception as e:
+                last_error = str(e)
+                print(f"Falha na tentativa {i+1} para {table_name}: {last_error}")
         
         if not vector_success:
-            print(f"⚠️ Aviso: Não foi possível gerar vetor para {table_name}. Usando indexação por palavras-chave como fallback.")
+            error_msg = f"ERRO CRÍTICO: Falha total na vetorização da tabela {table_name} após 3 tentativas. O treinamento não pode prosseguir sem busca semântica."
+            print(f"❌ {error_msg}")
+            raise Exception(error_msg)
 
         # 4. Preparar metadados para salvar
         existing_meta = self.storage.get_table_metadata(table_name) or {}
@@ -78,7 +87,7 @@ class TableTrainer:
             enriched_columns.append(enriched_col)
 
         # Salvar apenas uma amostra pequena nos metadados para não pesar o SQLite (50 linhas)
-        # mas manter o profile baseado nas 5000 linhas processadas
+        # mas manter o profile baseado na amostra adaptativa processada
         table_meta = {
             'table_name': table_name,
             'table_description': advanced_description,
