@@ -1,0 +1,1239 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<style>
+    :root {
+        --primary-color: #2c3e50;
+        --accent-color: #3498db;
+    }
+    
+    body {
+        background-color: #f8f9fa;
+    }
+
+    .container-fluid {
+        padding-left: 15px !important;
+        padding-right: 15px !important;
+        max-width: 100%; /* Ocupar toda a tela */
+    }
+
+    .tables-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); /* Grid responsivo mais denso */
+        gap: 15px;
+        padding: 10px 0;
+    }
+
+    .main-header-config {
+        background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+        border-radius: 10px;
+        padding: 20px;
+        margin-bottom: 25px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    }
+    
+    .nav-tabs .nav-link {
+        border: none;
+        background: #f8f9fa;
+        color: #6c757d;
+        padding: 12px 24px;
+        margin-right: 8px;
+        border-radius: 10px 10px 0 0;
+        font-weight: 500;
+        transition: all 0.3s;
+    }
+    
+    .nav-tabs .nav-link.active {
+        background: linear-gradient(135deg, #0066cc 0%, #004080 100%);
+        color: white;
+        box-shadow: 0 4px 15px rgba(0, 102, 204, 0.3);
+    }
+    
+    .nav-tabs .nav-link:hover {
+        background: #e9ecef;
+        transform: translateY(-2px);
+    }
+    
+    .nav-tabs .nav-link.active:hover {
+        background: linear-gradient(135deg, #0052a3 0%, #003366 100%);
+    }
+    
+    .tab-content {
+        background: white;
+        border-radius: 0 15px 15px 15px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        padding: 2rem;
+        min-height: 500px;
+    }
+    
+    .table-card {
+        background: white;
+        border-radius: 8px;
+        border: 1px solid #dee2e6;
+        padding: 12px;
+        transition: all 0.2s ease;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        height: 100%;
+    }
+
+    .table-card:hover {
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        transform: translateY(-2px);
+    }
+
+    .trained-row {
+        background-color: #f0fff4 !important; /* Verde ultra claro */
+        border-left: 4px solid #28a745;
+    }
+
+    .table-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 8px;
+    }
+
+    .table-name {
+        font-weight: 700;
+        color: var(--primary-color);
+        font-size: 1.05rem;
+        word-break: break-all;
+    }
+
+    .table-meta {
+        font-size: 0.8rem;
+        color: #6c757d;
+    }
+    
+    .table-status {
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: 500;
+    }
+    
+    .status-trained {
+        background: #d4edda;
+        color: #155724;
+    }
+    
+    .status-pending {
+        background: #fff3cd;
+        color: #856404;
+    }
+    
+    .status-processing {
+        background: #cce7ff;
+        color: #004085;
+    }
+    
+    .upload-area {
+        border: 2px dashed #dee2e6;
+        border-radius: 12px;
+        padding: 3rem;
+        text-align: center;
+        transition: all 0.3s;
+        background: #f8f9fa;
+    }
+    
+    .upload-area:hover {
+        border-color: #0066cc;
+        background: #f0f4ff;
+    }
+    
+    .upload-area.dragover {
+        border-color: #0066cc;
+        background: #e8f0ff;
+        transform: scale(1.02);
+    }
+    
+    .stats-card {
+        background: linear-gradient(135deg, #0066cc 0%, #004080 100%);
+        color: white;
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 4px 15px rgba(0, 102, 204, 0.3);
+    }
+    
+    .stats-number {
+        font-size: 2rem;
+        font-weight: 700;
+        margin-bottom: 0.5rem;
+    }
+    
+    .stats-label {
+        opacity: 0.9;
+        font-size: 0.9rem;
+    }
+    
+    .btn-train {
+        padding: 4px 12px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        width: 100%;
+        margin-top: 10px;
+    }
+    
+    .file-upload {
+        display: none;
+    }
+    
+    .upload-icon {
+        font-size: 3rem;
+        color: #0066cc;
+        margin-bottom: 1rem;
+    }
+
+    .spinner-border {
+        width: 1.5rem;
+        height: 1.5rem;
+    }
+
+    .loading-container {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+    }
+
+    .nav-tabs-sm .nav-link {
+        padding: 6px 12px;
+        font-size: 0.85rem;
+    }
+
+    .trained-row {
+        background-color: #d4edda !important; /* Verde claro */
+        transition: background-color 0.5s ease;
+    }
+    .loading-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(255, 255, 255, 0.8);
+        display: none;
+        justify-content: center;
+        align-items: center;
+        z-index: 9999;
+        flex-direction: column;
+    }
+    .loading-spinner {
+        width: 3rem;
+        height: 3rem;
+        margin-bottom: 1rem;
+    }
+.x-small-table {
+            font-size: 0.7rem !important;
+        }
+        .x-small-table td {
+            padding: 2px 5px !important;
+        }
+        .markdown-body h6:first-child {
+            margin-top: 0 !important;
+        }
+    </style>
+
+<!-- Overlay de Carregamento -->
+<div id="loadingOverlay" class="loading-overlay">
+    <div class="spinner-border text-primary loading-spinner" role="status"></div>
+    <h4 id="loadingMessage">Treinamento iniciado...</h4>
+    <p class="text-muted">A IA está realizando a análise avançada da tabela.</p>
+</div>
+
+<div class="container-fluid px-4 py-4">
+    <div class="main-header-config text-white">
+        <div class="d-flex justify-content-between align-items-center">
+            <div class="d-flex align-items-center">
+                <div class="main-icon d-flex align-items-center justify-content-center me-3"
+                     style="width: 60px; height: 60px; background: rgba(255,255,255,0.2);
+                            border-radius: 15px; backdrop-filter: blur(5px);">
+                    <i class="bi bi-cpu-fill fs-2 text-white"></i>
+                </div>
+                <div>
+                    <h1 class="fw-bold mb-1 fs-2">ROHDEN IA</h1>
+                    <p class="mb-0 text-white-50">Treine a inteligência artificial com dados reais da empresa</p>
+                </div>
+            </div>
+            <div class="text-end">
+                <div class="fs-4 fw-bold">Rohden AI</div>
+                <div class="text-white-50 small">Sistema Inteligente</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Abas de Navegação -->
+    <ul class="nav nav-tabs" id="trainingTabs" role="tablist">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="training-tab" data-bs-toggle="tab" data-bs-target="#training" type="button" role="tab">
+                <i class="bi bi-cpu me-2"></i>Treinamento
+            </button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="data-tab" data-bs-toggle="tab" data-bs-target="#data" type="button" role="tab">
+                <i class="bi bi-database me-2"></i>Dados da IA
+            </button>
+        </li>
+    </ul>
+
+    <!-- Conteúdo das Abas -->
+    <div class="tab-content" id="trainingTabContent">
+        
+        <!-- Aba 1: Treinamento (Planilha + Banco) -->
+        <div class="tab-pane fade show active" id="training" role="tabpanel">
+            <div class="row">
+                <!-- Seção de Banco de Dados -->
+                <div class="col-lg-6">
+                    <div class="card border-0 mb-4">
+                        <div class="card-header bg-primary text-white">
+                            <h5 class="mb-0">
+                                <i class="bi bi-database me-2"></i>Banco de Dados
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <!-- Seleção de Schema -->
+                            <div class="mb-3">
+                                <label class="form-label fw-bold">Schema</label>
+                                <select class="form-select" id="schemaSelect" onchange="loadTablesForSchema()">
+                                    <option value="">Carregando schemas...</option>
+                                </select>
+                            </div>
+                            
+                            <!-- Tabs para Tabelas Treinadas e Não Treinadas -->
+                            <ul class="nav nav-tabs nav-tabs-sm mb-3" id="tableTabs" role="tablist">
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link active" id="untrained-tab" data-bs-toggle="tab" data-bs-target="#untrained" type="button" role="tab">
+                                        <i class="bi bi-clock me-1"></i>Para Treinar
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="trained-tab" data-bs-toggle="tab" data-bs-target="#trained" type="button" role="tab">
+                                        <i class="bi bi-check-circle me-1"></i>Treinadas
+                                    </button>
+                                </li>
+                            </ul>
+                            
+                            <!-- Conteúdo das Tabs -->
+                            <div class="tab-content" id="tableTabContent">
+                                <!-- Tabelas Não Treinadas -->
+                                <div class="tab-pane fade show active" id="untrained" role="tabpanel">
+                                    <div class="mb-3">
+                                        <div class="input-group input-group-sm">
+                                            <span class="input-group-text bg-light border-end-0">
+                                                <i class="bi bi-search"></i>
+                                            </span>
+                                            <input type="text" id="searchUntrained" class="form-control border-start-0" 
+                                                   placeholder="Pesquisar tabela..." onkeyup="filterUntrainedTables()">
+                                        </div>
+                                    </div>
+                                    <div id="untrainedTablesList" class="tables-grid" style="max-height: 500px; overflow-y: auto;">
+                                        <div class="loading-container">
+                                            <div class="spinner-border spinner-border-sm text-primary" role="status">
+                                                <span class="visually-hidden">Carregando...</span>
+                                            </div>
+                                            <span class="ms-2">Carregando tabelas disponíveis...</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Tabelas Treinadas -->
+                                <div class="tab-pane fade" id="trained" role="tabpanel">
+                                    <div class="mb-3">
+                                        <div class="input-group input-group-sm">
+                                            <span class="input-group-text bg-light border-end-0">
+                                                <i class="bi bi-search"></i>
+                                            </span>
+                                            <input type="text" id="searchTrained" class="form-control border-start-0" 
+                                                   placeholder="Pesquisar tabela treinada..." onkeyup="filterTrainedTables()">
+                                        </div>
+                                    </div>
+                                    <div id="trainedTablesList" class="tables-grid" style="max-height: 500px; overflow-y: auto;">
+                                        <div class="loading-container">
+                                            <div class="spinner-border spinner-border-sm text-primary" role="status">
+                                                <span class="visually-hidden">Carregando...</span>
+                                            </div>
+                                            <span class="ms-2">Carregando tabelas treinadas...</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Seção de Planilha -->
+                <div class="col-lg-6">
+                    <div class="card border-0 mb-4">
+                        <div class="card-header bg-success text-white">
+                            <h5 class="mb-0">
+                                <i class="bi bi-file-earmark-excel me-2"></i>Planilha
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="upload-area" id="uploadArea" style="padding: 2rem;">
+                                <div class="upload-icon">
+                                    <i class="bi bi-cloud-upload"></i>
+                                </div>
+                                <h6 class="mb-2">Arraste sua planilha aqui</h6>
+                                <p class="text-muted mb-2 small">ou clique para selecionar</p>
+                                <p class="text-muted small">.xlsx, .xls, .csv (máx. 10MB)</p>
+                                <input type="file" id="fileInput" class="file-upload" accept=".xlsx,.xls,.csv">
+                                <button class="btn btn-success btn-sm" onclick="document.getElementById('fileInput').click()">
+                                    <i class="bi bi-upload me-1"></i>Selecionar
+                                </button>
+                            </div>
+                            
+                            <div id="uploadProgress" class="d-none mt-3">
+                                <h6 class="mb-2">Processando...</h6>
+                                <div class="progress mb-2">
+                                    <div class="progress-bar progress-bar-striped progress-bar-animated bg-success" 
+                                         role="progressbar" style="width: 0%" id="progressBar"></div>
+                                </div>
+                                <div id="uploadStatus" class="text-muted small"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+
+        </div>
+
+        <!-- Aba 2: Dados da IA (Relatórios) -->
+        <div class="tab-pane fade" id="data" role="tabpanel">
+            <h3 class="fw-bold text-dark mb-4">
+                <i class="bi bi-graph-up me-2 text-primary"></i>
+                Relatórios da IA
+            </h3>
+            
+            <div class="row" id="summaryContent">
+                <div class="loading-container">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Carregando...</span>
+                    </div>
+                    <span class="ms-2">Carregando dados da IA...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let trainedTables = [];
+    let uploadedFiles = [];
+    let trainingStats = {};
+    let availableSchemas = [];
+    let currentSchema = '';
+    let allOracleTables = [];
+
+    // Inicialização quando a página carrega
+    document.addEventListener('DOMContentLoaded', function() {
+        console.log('Inicializando sistema...');
+        loadSchemas();
+        loadTables();
+        loadTrainingStats();
+        setupUploadArea();
+    });
+
+    // Carregar schemas disponíveis
+    async function loadSchemas() {
+        console.log('Carregando schemas...');
+        try {
+            const response = await fetch('{{ url_for("config_rohden_ai_bp.get_schemas") }}');
+            const data = await response.json();
+            
+            console.log('Resposta dos schemas:', data);
+            
+            availableSchemas = data.schemas || ['SYSROH', 'HDS'];
+            
+            const schemaSelect = document.getElementById('schemaSelect');
+            schemaSelect.innerHTML = '<option value="">Selecione um schema...</option>';
+            
+            availableSchemas.forEach(schema => {
+                const option = document.createElement('option');
+                option.value = schema;
+                option.textContent = schema;
+                schemaSelect.appendChild(option);
+            });
+            
+            // Não seleciona nenhum schema automaticamente
+            currentSchema = '';
+            schemaSelect.value = '';
+            clearTablesLists();
+            
+        } catch (error) {
+            console.error('Erro ao carregar schemas:', error);
+            showNotification('Erro ao carregar schemas: ' + error.message, 'error');
+            
+            // Carrega schemas padrão em caso de erro
+            availableSchemas = ['SYSROH', 'HDS'];
+            const schemaSelect = document.getElementById('schemaSelect');
+            schemaSelect.innerHTML = '<option value="">Selecione um schema...</option>';
+            
+            availableSchemas.forEach(schema => {
+                const option = document.createElement('option');
+                option.value = schema;
+                option.textContent = schema;
+                schemaSelect.appendChild(option);
+            });
+            
+            currentSchema = '';
+            schemaSelect.value = '';
+            clearTablesLists();
+        }
+    }
+
+    // Carregar tabelas para o schema selecionado
+    async function loadTablesForSchema() {
+        const schemaSelect = document.getElementById('schemaSelect');
+        currentSchema = schemaSelect.value;
+        
+        console.log('Carregando tabelas para schema:', currentSchema);
+        
+        if (!currentSchema) {
+            clearTablesLists();
+            return;
+        }
+        
+        // Mostrar loading
+        showLoading();
+        
+        try {
+            // Carregar tabelas do Oracle
+            const response = await fetch(`/config_rohden_ai/get_tables_from_schema/${currentSchema}`);
+            const data = await response.json();
+            
+            console.log('Resposta das tabelas:', data);
+            
+            if (data.error) {
+                throw new Error(data.error);
+            }
+            
+            if (data.tables && Array.isArray(data.tables)) {
+                allOracleTables = data.tables.map(table => ({
+                    name: table,
+                    schema: currentSchema
+                }));
+                console.log('Tabelas Oracle carregadas:', allOracleTables);
+            } else {
+                console.log('Nenhuma tabela encontrada');
+                allOracleTables = [];
+            }
+            
+            // Renderizar tabelas
+            renderTables();
+            
+            // Garantir que a aba "Para Treinar" esteja selecionada ao trocar de schema
+            const untrainedTab = document.getElementById('untrained-tab');
+            if (untrainedTab && !untrainedTab.classList.contains('active')) {
+                untrainedTab.click();
+            }
+            
+        } catch (error) {
+            console.error('Erro ao carregar tabelas do schema:', error);
+            showNotification('Erro ao carregar tabelas: ' + error.message, 'error');
+            allOracleTables = [];
+            renderTables();
+        }
+    }
+
+    function showLoading() {
+        const trainedContainer = document.getElementById('trainedTablesList');
+        const untrainedContainer = document.getElementById('untrainedTablesList');
+        
+        const loadingHtml = `
+            <div class="loading-container">
+                <div class="spinner-border spinner-border-sm text-primary" role="status">
+                    <span class="visually-hidden">Carregando...</span>
+                </div>
+                <span class="ms-2">Carregando...</span>
+            </div>
+        `;
+        
+        trainedContainer.innerHTML = loadingHtml;
+        untrainedContainer.innerHTML = loadingHtml;
+    }
+
+    function renderTables() {
+        // Aba "Para Treinar" continua filtrada pelo schema selecionado
+        const trainedTableNames = trainedTables.map(t => t.name);
+        const untrainedTables = allOracleTables.filter(table => !trainedTableNames.includes(table.name));
+        
+        // Aba "Treinadas" agora mostra TUDO independente do schema
+        console.log('Tabelas treinadas (todas):', trainedTables);
+        console.log('Tabelas para treinar (schema atual):', untrainedTables);
+        
+        renderTrainedTables(trainedTables);
+        renderUntrainedTables(untrainedTables);
+    }
+
+    function formatDate(dateStr) {
+        if (!dateStr) return 'Data não disponível';
+        try {
+            // O SQLite retorna CURRENT_TIMESTAMP como "YYYY-MM-DD HH:MM:SS" em UTC
+            // Para o JS interpretar como UTC, precisamos do formato ISO "YYYY-MM-DDTHH:MM:SSZ"
+            const isoDate = dateStr.replace(' ', 'T') + 'Z';
+            const date = new Date(isoDate);
+            
+            if (isNaN(date.getTime())) {
+                // Tenta tratar como data local se falhar
+                const localDate = new Date(dateStr);
+                if (isNaN(localDate.getTime())) return dateStr;
+                return localDate.toLocaleString('pt-BR');
+            }
+            
+            return date.toLocaleString('pt-BR');
+        } catch (e) {
+            console.error('Erro ao formatar data:', dateStr, e);
+            return dateStr;
+        }
+    }
+
+    function renderTrainedTables(tables) {
+        const container = document.getElementById('trainedTablesList');
+        const searchTerm = document.getElementById('searchTrained').value.toLowerCase();
+        
+        const filteredTables = tables.filter(t => t.name.toLowerCase().includes(searchTerm));
+
+        if (filteredTables.length === 0) {
+            container.innerHTML = `
+                <div class="text-center py-4 w-100">
+                    <i class="bi bi-info-circle text-muted" style="font-size: 2.5rem;"></i>
+                    <p class="text-muted mt-2">Nenhuma tabela treinada encontrada</p>
+                </div>
+            `;
+            return;
+        }
+
+        const html = filteredTables.map(table => {
+            const dateStr = formatDate(table.updated_at);
+            const schema = table.schema || 'SYSROH';
+            
+            return `
+                <div class="table-card trained-row" onclick="showTableDetails('${table.name}')" 
+                     style="cursor: pointer; border-left: 4px solid #28a745; min-height: 100px;">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="table-name mb-1" style="font-size: 1rem; color: #2c3e50;">${table.name}</div>
+                            <div class="small text-muted">
+                                <span class="badge bg-light text-dark border me-1">${schema}</span>
+                                <span class="badge bg-success-subtle text-success border-success-subtle">TREINADA</span>
+                            </div>
+                        </div>
+                        <div class="d-flex gap-1">
+                            ${!table.has_vector ? '<i class="bi bi-exclamation-triangle-fill text-warning" title="Sem Vetor"></i>' : '<i class="bi bi-check-circle-fill text-success" title="Vetor OK"></i>'}
+                            ${table.export_status && table.export_status.startsWith('Erro') ? '<i class="bi bi-x-circle-fill text-danger" title="Erro Exportação"></i>' : '<i class="bi bi-cloud-check-fill text-info" title="Sincronizada"></i>'}
+                        </div>
+                    </div>
+                    <div class="mt-auto d-flex justify-content-between align-items-center pt-2 border-top" style="font-size: 0.75rem;">
+                        <span class="text-muted"><i class="bi bi-clock me-1"></i>${dateStr}</span>
+                        <span class="text-primary fw-bold">Ver detalhes <i class="bi bi-chevron-right"></i></span>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        
+        container.innerHTML = html;
+    }
+
+    function renderUntrainedTables(tables) {
+        const container = document.getElementById('untrainedTablesList');
+        const searchTerm = document.getElementById('searchUntrained').value.toLowerCase();
+        
+        const filteredTables = tables.filter(t => t.name.toLowerCase().includes(searchTerm));
+
+        if (filteredTables.length === 0) {
+            container.innerHTML = `
+                <div class="text-center py-4 w-100">
+                    <i class="bi bi-search text-muted" style="font-size: 2.5rem;"></i>
+                    <p class="text-muted mt-2">Nenhuma tabela encontrada no schema ${currentSchema}</p>
+                </div>
+            `;
+            return;
+        }
+
+        const html = filteredTables.map(table => `
+            <div class="table-card">
+                <div class="table-header">
+                    <span class="table-name">${table.name}</span>
+                    <span class="badge bg-warning text-dark" style="font-size: 0.6rem;">PENDENTE</span>
+                </div>
+                <div class="table-meta mb-2">
+                    <i class="bi bi-diagram-2 me-1"></i>${table.schema}
+                </div>
+                <button class="btn btn-primary btn-train" onclick="trainTable('${table.name}')">
+                    <i class="bi bi-play-fill me-1"></i>Treinar Tabela
+                </button>
+            </div>
+        `).join('');
+        
+        container.innerHTML = html;
+    }
+
+    function formatMarkdown(text) {
+        if (!text) return '';
+        
+        // Substituir cabeçalhos (### e ####) por negrito destacado
+        let formatted = text.replace(/### (.*)/g, '<h6 class="fw-bold mt-3 mb-2 text-primary border-bottom pb-1">$1</h6>');
+        formatted = formatted.replace(/#### (.*)/g, '<div class="fw-bold mt-2 mb-1 text-dark small">$1</div>');
+        
+        // Substituir negrito (**text**)
+        formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong class="text-dark">$1</strong>');
+        
+        // Substituir listas (- item)
+        formatted = formatted.replace(/^- (.*)/gm, '<div class="ms-3 mb-1"><i class="bi bi-dot me-1"></i>$1</div>');
+        
+        // Substituir tabelas markdown simples
+        if (formatted.includes('|')) {
+            const lines = formatted.split('\n');
+            let inTable = false;
+            let tableHtml = '<div class="table-responsive"><table class="table table-sm table-bordered mt-2 x-small-table"><tbody>';
+            
+            const processedLines = lines.map(line => {
+                if (line.includes('|')) {
+                    const cells = line.split('|').filter(c => c.trim().length > 0 || line.indexOf('|') !== line.lastIndexOf('|'));
+                    if (cells.length > 0 && !line.includes('---')) {
+                        let row = '<tr>' + cells.map(c => `<td>${c.trim()}</td>`).join('') + '</tr>';
+                        return row;
+                    }
+                    return '';
+                }
+                return line;
+            });
+            
+            formatted = processedLines.join('\n');
+        }
+
+        // Preservar quebras de linha
+        return formatted.replace(/\n/g, '<br>');
+    }
+
+    async function showTableDetails(tableName) {
+        const table = trainedTables.find(t => t.name === tableName);
+        if (!table) return;
+
+        // Mostrar loading no modal ou buscar metadados se necessário
+        // Por enquanto vamos usar o que temos no trainedTables e tentar carregar metadados completos
+        
+        try {
+            const response = await fetch('{{ url_for("config_rohden_ai_bp.get_current_config") }}');
+            const data = await response.json();
+            const meta = data.metadata[tableName];
+
+            const modalHtml = `
+                <div class="modal fade" id="tableDetailModal" tabindex="-1">
+                    <div class="modal-dialog modal-lg">
+                        <div class="modal-content">
+                            <div class="modal-header bg-light">
+                                <h5 class="modal-title fw-bold">
+                                    <i class="bi bi-table me-2"></i>${tableName}
+                                    <span class="badge bg-primary ms-2" style="font-size: 0.7rem;">${table.schema}</span>
+                                </h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="row mb-4">
+                                    <div class="col-md-12">
+                                        <h6 class="fw-bold text-muted small text-uppercase mb-2">Descrição e Inteligência de Dados</h6>
+                                        <div class="p-3 bg-white rounded border small shadow-sm markdown-body" style="max-height: 400px; overflow-y: auto; line-height: 1.5;">
+                                            ${formatMarkdown(table.description) || 'Sem descrição disponível.'}
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="row mb-4">
+                                    <div class="col-md-6">
+                                        <div class="stats-card p-3 mb-0" style="background: #f8f9fa; color: #333; border: 1px solid #dee2e6;">
+                                            <div class="stats-number" style="font-size: 1.5rem; color: #0066cc;">${table.record_count}</div>
+                                            <div class="stats-label text-muted">Registros Totais</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="stats-card p-3 mb-0" style="background: #f8f9fa; color: #333; border: 1px solid #dee2e6;">
+                                            <div class="stats-number" style="font-size: 1.5rem; color: #28a745;">${meta ? meta.columns.length : 0}</div>
+                                            <div class="stats-label text-muted">Colunas Mapeadas</div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <ul class="nav nav-tabs" id="modalTabs" role="tablist">
+                                    <li class="nav-item">
+                                        <button class="nav-link active py-2" data-bs-toggle="tab" data-bs-target="#tab-columns">Colunas</button>
+                                    </li>
+                                    <li class="nav-item">
+                                        <button class="nav-link py-2" data-bs-toggle="tab" data-bs-target="#tab-samples">Amostra</button>
+                                    </li>
+                                </ul>
+                                <div class="tab-content border-top-0 p-3 bg-white border rounded-bottom">
+                                    <div class="tab-pane fade show active" id="tab-columns">
+                                        <div style="max-height: 300px; overflow-y: auto;">
+                                            <table class="table table-sm table-hover small">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Coluna</th>
+                                                        <th>Tipo</th>
+                                                        <th>PK</th>
+                                                        <th>Comentário</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    ${meta ? meta.columns.map(c => `
+                                                        <tr>
+                                                            <td class="fw-bold">${c.name}</td>
+                                                            <td><span class="badge bg-light text-dark border">${c.type}</span></td>
+                                                            <td>${c.is_pk ? '<i class="bi bi-key-fill text-warning"></i>' : ''}</td>
+                                                            <td class="text-muted">${c.comment || '-'}</td>
+                                                        </tr>
+                                                    `).join('') : '<tr><td colspan="4">Sem dados</td></tr>'}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                    <div class="tab-pane fade" id="tab-samples">
+                                        <div style="max-height: 300px; overflow-x: auto;">
+                                            <table class="table table-sm table-hover small">
+                                                <thead>
+                                                    <tr>
+                                                        ${meta && meta.samples.length > 0 ? Object.keys(meta.samples[0]).map(k => `<th>${k}</th>`).join('') : ''}
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    ${meta ? meta.samples.slice(0, 5).map(row => `
+                                                        <tr>
+                                                            ${Object.values(row).map(v => `<td>${v}</td>`).join('')}
+                                                        </tr>
+                                                    `).join('') : '<tr><td>Sem amostras</td></tr>'}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="modal-footer bg-light">
+                                <button class="btn btn-outline-danger btn-sm" onclick="removeTable('${tableName}')">
+                                    <i class="bi bi-trash me-1"></i>Remover Treinamento
+                                </button>
+                                <button class="btn btn-primary btn-sm" onclick="trainTable('${tableName}')">
+                                    <i class="bi bi-arrow-clockwise me-1"></i>Retreinar Agora
+                                </button>
+                                <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Fechar</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Remover modal anterior se existir
+            const oldModal = document.getElementById('tableDetailModal');
+            if (oldModal) {
+                const modalInstance = bootstrap.Modal.getInstance(oldModal);
+                if (modalInstance) modalInstance.hide();
+                oldModal.remove();
+            }
+
+            // Inserir e mostrar novo modal
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+            const modal = new bootstrap.Modal(document.getElementById('tableDetailModal'));
+            modal.show();
+
+        } catch (error) {
+            console.error('Erro ao carregar detalhes:', error);
+            showNotification('Erro ao carregar detalhes da tabela', 'error');
+        }
+    }
+
+    function filterUntrainedTables() {
+        const trainedTableNames = trainedTables.map(t => t.name);
+        const untrainedTables = allOracleTables.filter(table => !trainedTableNames.includes(table.name));
+        renderUntrainedTables(untrainedTables);
+    }
+
+    function filterTrainedTables() {
+        renderTrainedTables(trainedTables);
+    }
+
+    // Treinar tabela específica
+    async function trainTable(tableName) {
+        console.log('Iniciando treinamento da tabela:', tableName);
+        
+        if (!confirm(`Treinar a tabela ${tableName}?`)) {
+            return;
+        }
+
+        // Mostrar overlay de carregamento
+        const overlay = document.getElementById('loadingOverlay');
+        overlay.style.display = 'flex';
+        
+        try {
+            showNotification('Treinamento iniciado...', 'info');
+            
+            const response = await fetch('{{ url_for("config_rohden_ai_bp.process_table") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    table_name: tableName,
+                    schema_name: currentSchema 
+                })
+            });
+            
+            const result = await response.json();
+            console.log('Resultado do treinamento:', result);
+            
+            if (result.success) {
+                showNotification(`Tabela ${tableName} treinada com sucesso!`, 'success');
+                
+                // Marcar a tabela como treinada visualmente (Verde)
+                const cards = document.querySelectorAll('.table-card');
+                cards.forEach(card => {
+                    const nameElement = card.querySelector('.table-name');
+                    if (nameElement && nameElement.textContent.trim() === tableName) {
+                        card.classList.add('trained-row');
+                        const btn = card.querySelector('.btn-train');
+                        if (btn) {
+                            btn.innerHTML = '<i class="bi bi-check-circle me-1"></i>Treinada';
+                            btn.className = 'btn btn-sm btn-success disabled';
+                        }
+                    }
+                });
+                
+                // Recarregar os dados para atualizar as duas abas
+                await loadTables();
+                await loadTablesForSchema();
+            } else {
+                throw new Error(result.error || 'Erro desconhecido');
+            }
+        } catch (error) {
+            console.error('Erro ao treinar tabela:', error);
+            showNotification('Erro ao treinar tabela: ' + error.message, 'error');
+        } finally {
+            // Esconder overlay
+            overlay.style.display = 'none';
+        }
+    }
+
+    // Remover tabela do treinamento
+    async function removeTable(tableName) {
+        if (!confirm(`Remover tabela ${tableName} do treinamento?`)) {
+            return;
+        }
+        
+        try {
+            trainedTables = trainedTables.filter(t => t.name !== tableName);
+            await saveTables();
+            renderTables();
+            showNotification('Tabela removida', 'success');
+        } catch (error) {
+            console.error('Erro ao remover tabela:', error);
+            showNotification('Erro ao remover tabela: ' + error.message, 'error');
+        }
+    }
+
+    // Carregar configuração atual
+    async function loadTables() {
+        console.log('Buscando tabelas treinadas da API...');
+        try {
+            const response = await fetch('{{ url_for("config_rohden_ai_bp.get_current_config") }}');
+            const data = await response.json();
+            
+            console.log('Tabelas treinadas carregadas da API:', data);
+            
+            if (data.tables) {
+                trainedTables = data.tables.map(table => ({
+                    ...table,
+                    schema: table.schema || 'SYSROH'
+                }));
+                console.log('Variável trainedTables atualizada:', trainedTables);
+            }
+            
+            // Renderizar sempre, independente de ter schema selecionado
+            // (A lista de treinadas mostrará tudo, a de não-treinadas mostrará nada se não houver schema)
+            renderTables();
+            
+        } catch (error) {
+            console.error('Erro ao carregar configuração de tabelas treinadas:', error);
+        }
+    }
+
+    // Salvar tabelas
+    async function saveTables() {
+        try {
+            const response = await fetch('{{ url_for("config_rohden_ai_bp.save_config") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tables: trainedTables })
+            });
+            
+            const result = await response.json();
+            if (!result.success) {
+                throw new Error(result.error);
+            }
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    function clearTablesLists() {
+        // A lista de treinadas continua mostrando tudo
+        renderTrainedTables(trainedTables);
+        
+        // A lista de não-treinadas avisa para selecionar schema
+        document.getElementById('untrainedTablesList').innerHTML = `
+            <div class="text-center py-4 w-100">
+                <i class="bi bi-diagram-2 text-muted" style="font-size: 2.5rem;"></i>
+                <p class="text-muted mt-2">Selecione um schema para ver as tabelas disponíveis para treinamento</p>
+            </div>
+        `;
+    }
+
+    // Upload de arquivos
+    function setupUploadArea() {
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            handleFiles(e.dataTransfer.files);
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            handleFiles(e.target.files);
+        });
+    }
+
+    async function handleFiles(files) {
+        if (files.length === 0) return;
+        
+        const file = files[0];
+        const maxSize = 10 * 1024 * 1024; // 10MB
+        
+        if (file.size > maxSize) {
+            showNotification('Arquivo muito grande. Máximo 10MB.', 'error');
+            return;
+        }
+
+        const validTypes = ['.xlsx', '.xls', '.csv'];
+        const fileExt = '.' + file.name.split('.').pop().toLowerCase();
+        
+        if (!validTypes.includes(fileExt)) {
+            showNotification('Formato inválido. Use .xlsx, .xls ou .csv', 'error');
+            return;
+        }
+
+        await uploadFile(file);
+    }
+
+    async function uploadFile(file) {
+        const uploadArea = document.getElementById('uploadArea');
+        const uploadProgress = document.getElementById('uploadProgress');
+        const progressBar = document.getElementById('progressBar');
+        const uploadStatus = document.getElementById('uploadStatus');
+
+        uploadArea.classList.add('d-none');
+        uploadProgress.classList.remove('d-none');
+
+        try {
+            // Simulação de upload progress
+            let progress = 0;
+            const progressInterval = setInterval(() => {
+                progress += Math.random() * 30;
+                if (progress > 90) progress = 90;
+                
+                progressBar.style.width = progress + '%';
+                uploadStatus.textContent = `Processando... ${Math.round(progress)}%`;
+            }, 500);
+
+            setTimeout(() => {
+                clearInterval(progressInterval);
+                progressBar.style.width = '100%';
+                uploadStatus.textContent = 'Upload concluído!';
+                
+                uploadedFiles.push({
+                    name: file.name,
+                    size: file.size,
+                    uploaded: new Date()
+                });
+
+                setTimeout(() => {
+                    uploadArea.classList.remove('d-none');
+                    uploadProgress.classList.add('d-none');
+                    showNotification('Planilha carregada com sucesso!', 'success');
+                }, 2000);
+            }, 3000);
+
+        } catch (error) {
+            showNotification('Erro no upload: ' + error.message, 'error');
+            uploadArea.classList.remove('d-none');
+            uploadProgress.classList.add('d-none');
+        }
+    }
+
+    // Carregar estatísticas
+    async function loadTrainingStats() {
+        try {
+            trainingStats = {
+                totalTables: trainedTables.length,
+                trainedTables: trainedTables.filter(t => t.processed).length,
+                uploadedFiles: uploadedFiles.length,
+                totalQueries: 0,
+                accuracy: 0,
+                lastUpdate: new Date()
+            };
+
+            // Carregar fluxos de processos
+            const response = await fetch('{{ url_for("config_rohden_ai_bp.get_process_flows") }}');
+            const flowData = await response.json();
+            trainingStats.flows = flowData.flows || [];
+
+            renderSummary();
+        } catch (error) {
+            console.error('Erro ao carregar estatísticas:', error);
+        }
+    }
+
+    function renderSummary() {
+        const container = document.getElementById('summaryContent');
+        
+        let html = `
+            <div class="row mb-4">
+                <div class="col-md-3">
+                    <div class="stats-card text-center">
+                        <div class="stats-number">${trainingStats.totalTables}</div>
+                        <div class="stats-label">Tabelas Configuradas</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="stats-card text-center">
+                        <div class="stats-number">${trainingStats.trainedTables}</div>
+                        <div class="stats-label">Tabelas Treinadas</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="stats-card text-center">
+                        <div class="stats-number">${trainingStats.uploadedFiles}</div>
+                        <div class="stats-label">Planilhas Carregadas</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="stats-card text-center">
+                        <div class="stats-number">${trainingStats.totalQueries}</div>
+                        <div class="stats-label">Consultas Realizadas</div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        if (trainingStats.flows && trainingStats.flows.length > 0) {
+            html += `
+                <div class="row">
+                    <div class="col-12">
+                        <div class="card border-0 shadow-sm">
+                            <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Fluxos de Processos Descobertos</h5>
+                                <span class="badge bg-primary">Automático</span>
+                            </div>
+                            <div class="card-body">
+                                ${trainingStats.flows.map(flow => `
+                                    <div class="process-flow-item mb-4 p-3 border rounded bg-light">
+                                        <h6 class="fw-bold text-primary mb-3">${flow.process_name}</h6>
+                                        <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+                                            ${flow.flow_sequence.map((step, idx) => `
+                                                <div class="badge bg-white text-dark border p-2 shadow-sm">
+                                                    <span class="text-muted me-1">${idx + 1}.</span> ${step}
+                                                </div>
+                                                ${idx < flow.flow_sequence.length - 1 ? '<i class="bi bi-arrow-right text-muted"></i>' : ''}
+                                            `).join('')}
+                                        </div>
+                                        <div class="row mt-3">
+                                            <div class="col-md-6">
+                                                <div class="small fw-bold text-muted mb-2">⏱️ Regras de Timing:</div>
+                                                <ul class="list-unstyled small">
+                                                    ${flow.timing_insights.map(insight => `
+                                                        <li class="mb-1">
+                                                            <i class="bi bi-clock-history text-info me-2"></i>
+                                                            ${insight.rule || insight.insight}
+                                                        </li>
+                                                    `).join('')}
+                                                </ul>
+                                            </div>
+                                            <div class="col-md-6 border-start">
+                                                <div class="small fw-bold text-muted mb-2">📝 Resumo do Ciclo:</div>
+                                                <p class="small text-secondary mb-0">
+                                                    ${flow.description || 'Ciclo de vida dos dados identificado automaticamente pela análise de sequenciamento temporal.'}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else {
+            html += `
+                <div class="row">
+                    <div class="col-12 text-center py-5">
+                        <i class="bi bi-diagram-3 text-muted" style="font-size: 3rem;"></i>
+                        <p class="text-muted mt-3">Nenhum fluxo de processo identificado ainda.<br>Treine tabelas como TB_CONTATOS e TB_ORCAMENTO para descobrir fluxos.</p>
+                    </div>
+                </div>
+            `;
+        }
+
+        container.innerHTML = html;
+    }
+
+    async function saveTraining() {
+        try {
+            await saveTables();
+            showNotification('Treinamento iniciado com sucesso!', 'success');
+            // Mudar para aba de dados
+            const dataTab = new bootstrap.Tab(document.getElementById('data-tab'));
+            dataTab.show();
+        } catch (error) {
+            showNotification('Erro ao iniciar treinamento: ' + error.message, 'error');
+        }
+    }
+
+    function showNotification(message, type) {
+        // Criar elemento de notificação
+        const notification = document.createElement('div');
+        notification.className = `alert alert-${type === 'error' ? 'danger' : type === 'success' ? 'success' : 'info'} alert-dismissible fade show`;
+        notification.style.position = 'fixed';
+        notification.style.top = '20px';
+        notification.style.right = '20px';
+        notification.style.zIndex = '9999';
+        notification.style.minWidth = '300px';
+        
+        notification.innerHTML = `
+            ${message}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        
+        document.body.appendChild(notification);
+        
+        // Remover após 5 segundos
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.parentNode.removeChild(notification);
+            }
+        }, 5000);
+        
+        console.log(`${type}: ${message}`);
+    }
+</script>
+
+{% endblock %}
