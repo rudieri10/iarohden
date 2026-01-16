@@ -581,7 +581,8 @@ class MemoriaConversacional:
         """Extrai aprendizado automático da interação com análise de sentimento (otimizado)"""
         # 1. Aprendizado Passivo Semântico (Novo sistema robusto)
         try:
-            self.passive_learner.analyze_interaction(user_name, user_query, ai_response)
+            if self.passive_learner:
+                self.passive_learner.analyze_interaction(user_name, user_query, ai_response)
         except Exception as e:
             print(f"Erro no aprendizado passivo: {e}")
 
