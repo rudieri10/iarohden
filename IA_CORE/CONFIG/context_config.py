@@ -2,7 +2,7 @@
 
 CONTEXT_CONFIG = {
     # Quantidade de mensagens recentes para manter no contexto
-    "max_history_messages": 5,
+    "max_history_messages": 25,
     
     # Limite de caracteres por mensagem no histórico
     "max_chars_per_message": 400,

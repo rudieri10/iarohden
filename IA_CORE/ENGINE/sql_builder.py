@@ -43,6 +43,8 @@ class SQLBuilder:
         if order_by:
             order_parts = []
             for item in order_by:
+                if not item or not isinstance(item, dict):
+                    continue
                 field = self._safe_field(item.get("field"))
                 if not field:
                     continue
@@ -74,6 +76,8 @@ class SQLBuilder:
                 field_parts.append(safe)
 
         for agg in aggregations:
+            if not agg or not isinstance(agg, dict):
+                continue
             func = (agg.get("func") or "").upper()
             if func not in ("COUNT", "SUM", "AVG", "MIN", "MAX"):
                 continue
@@ -95,12 +99,14 @@ class SQLBuilder:
         params: List[Any] = []
 
         for flt in filters:
+            if not flt or not isinstance(flt, dict):
+                continue
             field = self._safe_field(flt.get("field"))
             if not field:
                 continue
 
             op = (flt.get("op") or "=").upper()
-            if op not in ("=", "LIKE", ">", ">=", "<", "<="):
+            if op not in ("=", "LIKE", "NOT LIKE", "!=", "<>", ">", ">=", "<", "<="):
                 op = "="
 
             value = flt.get("value")

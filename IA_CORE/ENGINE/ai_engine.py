@@ -9,6 +9,8 @@ from ..MEMORIA import memoria_system
 from .sql_builder import SQLBuilder
 from .vector_manager import VectorManager
 from ..DATA import storage
+from ..CONFIG.ai_temperature_config import AI_TEMPERATURE_SETTINGS, get_personality
+from ..CONFIG.prompt_manager import load_prompt
 from dotenv import load_dotenv
 
 # Carregar variáveis de ambiente do arquivo .env de forma robusta
@@ -89,7 +91,6 @@ class LlamaEngine:
     _decision_cache = {}   # Cache de decisão (CHAT/QUERY) por pergunta normalizada
     _training_cache = None
     _training_cache_time = 0
-    _degraded_urls = {}    # URLs com falha temporária
     
     def __new__(cls):
         if cls._instance is None:
@@ -100,9 +101,8 @@ class LlamaEngine:
             # Configuração do Motor Principal (Rohden AI Server)
             cls._instance.ai_url = os.getenv("ROHDEN_AI_URL")
             cls._instance.ai_url_internal = os.getenv("ROHDEN_AI_INTERNAL_URL")
-            cls._instance.ai_url_localhost = "http://127.0.0.1:5005/api/generate"
-            cls._instance.ai_model = os.getenv("ROHDEN_AI_MODEL", "llama3.1-gguf")
-            cls._instance.api_key = os.getenv("ROHDEN_AI_KEY", "ROHDEN_AI_SECRET_2024")
+            cls._instance.ai_model = os.getenv("ROHDEN_AI_MODEL")
+            cls._instance.api_key = os.getenv("ROHDEN_AI_KEY")
             
             # Headers para o Servidor Rohden
             cls._instance.rohden_headers = {
@@ -244,23 +244,22 @@ class LlamaEngine:
             return f"Erro ao executar SQL: {str(e)}"
 
     def _format_results(self, query_plan: Dict[str, Any], results: List[Dict[str, Any]]) -> str:
+        """
+        Formata resultados brutos. 
+        REGRA: Não deve conter frases completas para o usuário, apenas estrutura de dados.
+        """
         if not results:
-            label = self._table_label(query_plan.get('table'))
-            if label:
-                return f"Nao encontrei nenhum {label} com esse criterio."
-            return "Nao encontrei nenhum registro com esse criterio."
+            return "Nenhum dado encontrado para os critérios informados."
 
         # Caso de agregacao (ex: COUNT)
         if query_plan.get('aggregations'):
             total = None
-            for key in ['TOTAL', 'total', 'Total']:
+            for key in ['TOTAL', 'total', 'Total', 'COUNT', 'count']:
                 if key in results[0]:
                     total = results[0][key]
                     break
             if total is not None:
-                label = self._table_label(query_plan.get('table'))
-                prefix = f"Total de {label}s" if label else "Total"
-                return f"{prefix}: {total}."
+                return f"Resultado: {total}"
 
         fields = query_plan.get('fields') or list(results[0].keys())
         fields = [f for f in fields if f in results[0]] or list(results[0].keys())
@@ -268,14 +267,13 @@ class LlamaEngine:
         if len(results) == 1:
             return self._format_single_row(results[0], fields)
 
-        preview = results[:5]
+        preview = results[:10] # Aumentado preview
         linhas = [self._format_row_line(row, fields) for row in preview]
         linhas = [linha for linha in linhas if linha]
+        
         total = len(results)
-        header = f"Encontrei {total} registros."
-        if not linhas:
-            return header
-        return header + "\n" + "\n".join(linhas)
+        res = f"Registros: {total}\n"
+        return res + "\n".join(linhas)
 
     def _format_single_row(self, row: Dict[str, Any], fields: List[str]) -> str:
         partes = []
@@ -283,10 +281,8 @@ class LlamaEngine:
             value = row.get(field)
             if value is None:
                 continue
-            partes.append(f"{self._humanize_field_name(field)}: {value}")
-        if partes:
-            return "Registro encontrado: " + ", ".join(partes)
-        return "Registro encontrado."
+            partes.append(f"{field}: {value}")
+        return " | ".join(partes)
 
     def _format_row_line(self, row: Dict[str, Any], fields: List[str]) -> str:
         partes = []
@@ -294,10 +290,10 @@ class LlamaEngine:
             value = row.get(field)
             if value is None:
                 continue
-            partes.append(f"{self._humanize_field_name(field)}: {value}")
+            partes.append(f"{field}: {value}")
         if not partes:
             return ""
-        return "- " + ", ".join(partes)
+        return "- " + " | ".join(partes)
 
     def _humanize_field_name(self, name: str) -> str:
         return str(name).replace('_', ' ').title()
@@ -312,42 +308,61 @@ class LlamaEngine:
         }
         return mapping.get(table_name.upper(), 'registro')
 
-    def _humanize_response(self, prompt: str, results: List[Dict[str, Any]], fallback_text: str) -> str:
+    def _humanize_response(self, prompt: str, results: List[Dict[str, Any]], raw_text: str) -> str:
+        """
+        Humaniza os dados brutos usando a IA como um juiz inteligente.
+        """
+        # Se não houver resultados, pedimos à IA para dar uma resposta humana de "não encontrado"
         if not results:
-            return fallback_text
+            sys_prompt = load_prompt("humanizer_empty.txt")
+            user_prompt = f"Pergunta do usuário: '{prompt}'\nResultado: [Vazio]"
+            try:
+                return self._call_ai_with_limits(user_prompt, sys_prompt, num_predict=150, num_ctx=1024, temperature=0.5)
+            except:
+                return raw_text
 
-        data_preview = results[:5]
-        data_json = json.dumps(data_preview, ensure_ascii=False, default=str, indent=2)
-        system_prompt = "Voce e um assistente corporativo. Responda curto e claro."
+        # Preparação dos dados para a IA decidir (O Juiz)
+        data_json = json.dumps(results[:10], ensure_ascii=False, default=str)
+        pers_prompt, temp = get_personality("CHAT")
+        
+        sys_prompt = load_prompt("humanizer_judge.txt", pers_prompt=pers_prompt)
+
         user_prompt = (
-            f"Pergunta: {prompt}\n"
-            f"Dados:\n{data_json}\n\n"
-            "Gere uma resposta objetiva e direta, sem mencionar tabelas tecnicas."
+            f"O que o usuário quer: '{prompt}'\n"
+            f"O que eu encontrei no banco: {data_json}\n\n"
+            "Analise os dados acima e responda de forma inteligente. Se houver dúvida, pergunte ao usuário."
         )
 
         try:
-            response = self._call_ai_with_limits(user_prompt, system_prompt, num_predict=384, num_ctx=2048, temperature=0.2)
-            if response:
-                return response.strip()
+            response = self._call_ai_with_limits(user_prompt, sys_prompt, num_predict=400, num_ctx=2048, temperature=temp)
+            return response.strip() if response else raw_text
         except Exception:
-            pass
-
-        return fallback_text
+            return raw_text
 
     def discover_relevant_tables(self, prompt, all_tables, top_n=3):
-        """Usa busca vetorial para encontrar as tabelas mais relevantes para a pergunta"""
+        """Usa busca vetorial para encontrar apenas as tabelas TREINADAS e relevantes"""
         if not all_tables:
             return []
             
-        # Tenta busca vetorial
-        relevant = self.vector_manager.find_most_similar(prompt, all_tables, top_n=top_n)
+        # Filtra apenas tabelas que possuem metadados mínimos (consideradas "treinadas")
+        trained_tables = [
+            t for t in all_tables 
+            if t.get('columns_info') and (t.get('table_description') or t.get('semantic_context'))
+        ]
+        
+        if not trained_tables:
+            print("⚠️ Nenhuma tabela treinada encontrada no banco de dados.")
+            return []
+
+        # Tenta busca vetorial nas tabelas treinadas
+        relevant = self.vector_manager.find_most_similar(prompt, trained_tables, top_n=top_n)
         
         if relevant:
-            print(f"Busca Vetorial encontrou {len(relevant)} tabelas relevantes.")
+            print(f"Busca Vetorial encontrou {len(relevant)} tabelas treinadas relevantes.")
             return relevant
             
-        # Fallback: Se vetores falharem, retorna as primeiras N (comportamento antigo)
-        return all_tables[:top_n]
+        # Fallback: Se vetores falharem, retorna as primeiras N tabelas treinadas
+        return trained_tables[:top_n]
 
     def _build_table_catalog(self, tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         catalog = []
@@ -372,108 +387,189 @@ class LlamaEngine:
         if not text:
             return None
 
-        # Tenta extrair bloco ```json```
+        # DEBUG: Ver o que a IA está retornando
+        print(f"🔍 TEXTO BRUTO DA IA: '{text}'")
+
+        # Limpeza agressiva: Se a IA repetiu o histórico ou o prompt, pegamos apenas o primeiro JSON válido
+        # Isso evita que o "HISTÓRICO" vaze para a resposta final
+        
+        # 1. Tenta encontrar blocos JSON primeiro (do mais longo para o mais curto)
+        json_matches = re.findall(r'(\{.*?\})', text, re.DOTALL)
+        if json_matches:
+            # Ordenar por tamanho decrescente para pegar o JSON mais completo
+            json_matches.sort(key=len, reverse=True)
+            
+            for match in json_matches:
+                try:
+                    # Limpeza agressiva
+                    clean_match = match.strip()
+                    for junk in ['```json', '```', 'ESTRUTURA DO JSON', 'FORMATO OBRIGATÓRIO', 'JSON:']:
+                        clean_match = clean_match.replace(junk, '')
+                    
+                    clean_match = clean_match.strip()
+                    
+                    # Ignorar se parecer um template vazio ou de instrução
+                    if '...' in clean_match or 'NOME_TABELA' in clean_match or 'NOME_DA_TABELA' in clean_match or 'SUA_RESPOSTA' in clean_match:
+                        continue
+
+                    data = json.loads(clean_match)
+                    if 'action' in data:
+                        # Validação extra
+                        if data.get('action') == 'DATA_ANALYSIS' and (not data.get('target_table') or data.get('target_table') == 'NOME_TABELA'):
+                            continue
+                            
+                        return data
+                except:
+                    continue
+
+        # 2. Se não achou JSON estruturado, mas o texto é amigável, assume CHAT
+        # Mas removemos qualquer menção a "HISTÓRICO" ou "U:" / "A:" que possa ter vazado
+        if '{' not in text and len(text.strip()) > 5:
+            # Limpa o texto de possíveis vazamentos de contexto
+            clean_text = text.split("CONTEXTO ANTERIOR")[0].split("HISTÓRICO")[0].strip()
+            # Remove marcadores de diálogo se houver
+            clean_text = re.sub(r'^(Usuário|IA|U|A):\s*', '', clean_text, flags=re.MULTILINE)
+            print("⚠️ RESPOSTA EM TEXTO PURO - Convertendo para CHAT")
+            return {"action": "CHAT", "text": clean_text.strip()}
+
+        # 3. Fallback original para blocos ```json
         json_block = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL | re.IGNORECASE)
         if json_block:
-            text = json_block.group(1)
-
-        # Fallback: pega do primeiro { ao ultimo }
-        if '{' in text and '}' in text:
-            text = text[text.find('{'):text.rfind('}') + 1]
+            try:
+                return json.loads(json_block.group(1))
+            except: pass
 
         try:
-            return json.loads(text)
-        except Exception:
+            result = json.loads(text)
+            print(f"✅ JSON VÁLIDO: {result}")
+            return result
+        except Exception as e:
+            # Se falhou o parse mas tem conteúdo, ainda tenta tratar como CHAT
+            if len(text.strip()) > 10:
+                print(f"⚠️ ERRO JSON ({e}), mas tratando como CHAT por segurança.")
+                return {"action": "CHAT", "text": text.strip()}
+            
+            print(f"❌ ERRO JSON CRÍTICO: {e}")
             return None
 
-    def _call_ai_with_limits(self, prompt: str, system_prompt: str, num_predict: int, num_ctx: int = 1024, temperature: float = 0.1) -> str:
-        """Wrapper leve para chamadas rápidas (decisão/chat/plano) com poucos tokens."""
+    def _call_ai_with_limits(self, prompt: str, system_prompt: str, num_predict: int, num_ctx: int = 1024, temperature: float = 0.1, retries: int = 2, stop: List[str] = None) -> str:
+        """Chamada direta para a IA com tratamento de erros 500 e failover entre URLs do ambiente."""
         import time
-        candidate_urls = []
-
-        # 1. Tenta IP interno (mais rápido)
-        if self.ai_url_internal:
-            candidate_urls.append(self.ai_url_internal)
         
-        # 2. Tenta URL pública (fallback se estiver fora da rede)
-        if self.ai_url:
-            candidate_urls.append(self.ai_url)
+        # Stop tokens padrão
+        default_stop = ["### Instruction:", "### Response:", "Pergunta do Usuário:", "Resposta do Assistente:"]
+        if stop:
+            default_stop.extend(stop)
+        
+        # Coleta todas as URLs configuradas no ambiente (sem hardcode)
+        available_urls = []
+        if self.ai_url_internal: available_urls.append(self.ai_url_internal)
+        if self.ai_url: available_urls.append(self.ai_url)
+        
+        if not available_urls:
+            print("❌ ERRO: Nenhuma URL de IA configurada no ambiente (.env)")
+            return ""
 
-        # 3. Fallback fixo se nada estiver no .env
-        if not candidate_urls:
-            candidate_urls.append("http://192.168.1.217:5005/api/generate")
+        current_num_ctx = num_ctx
+        
+        for attempt in range(retries):
+            # Tenta cada URL disponível
+            for target_url in available_urls:
+                try:
+                    # Garante o endpoint correto para Ollama
+                    if not target_url.endswith('/api/generate') and '/api/' not in target_url:
+                        target_url = target_url.rstrip('/') + '/api/generate'
 
-        candidate_urls = list(dict.fromkeys([u for u in candidate_urls if u]))
-        now = time.time()
-        def url_priority(u):
-            if u in self._degraded_urls:
-                fail_time, count = self._degraded_urls[u]
-                if now - fail_time < 300:  # Penaliza por 5 minutos
-                    return count + 10
-            return 0
-        candidate_urls.sort(key=url_priority)
+                    # Detectar se é o endpoint /api/chat para ajustar o payload
+                    is_chat_api = '/api/chat' in target_url
 
-        last_error = ""
-        for url in candidate_urls:
-            try:
-                target_url = url
-                # Garante que a URL termine corretamente
-                if not target_url.endswith('/api/generate') and '/api/' not in target_url:
-                    target_url = target_url.rstrip('/') + '/api/generate'
-                elif target_url.endswith('/api/'):
-                    target_url = target_url + 'generate'
+                    # Se for a segunda tentativa e deu erro 500, reduzimos o contexto
+                    if attempt > 0:
+                        current_num_ctx = max(512, int(current_num_ctx * 0.7))
+                        print(f"🔄 Reduzindo contexto para {current_num_ctx} tokens na tentativa {attempt+1}")
 
-                payload = {
-                    "model": self.ai_model or "llama3.1-gguf",
-                    "prompt": prompt,
-                    "system": system_prompt,
-                    "stream": False,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": int(num_predict),
-                        "num_ctx": int(num_ctx)
-                    }
-                }
+                    if is_chat_api:
+                        payload = {
+                            "model": self.ai_model,
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": prompt}
+                            ],
+                            "stream": False,
+                            "options": {
+                                "temperature": temperature,
+                                "num_predict": int(num_predict),
+                                "num_ctx": current_num_ctx,
+                                "stop": default_stop
+                            }
+                        }
+                    else:
+                        payload = {
+                            "model": self.ai_model,
+                            "prompt": prompt,
+                            "system": system_prompt,
+                            "stream": False,
+                            "options": {
+                                "temperature": temperature,
+                                "num_predict": int(num_predict),
+                                "num_ctx": current_num_ctx,
+                                "stop": default_stop
+                            }
+                        }
 
-                # Timeout menor para o interno, maior para o público
-                is_internal = "192.168." in target_url or "127.0.0.1" in target_url or "localhost" in target_url
-                timeout = 15 if is_internal else 30
-                
-                print(f"Tentando Rohden AI em: {target_url} (timeout: {timeout}s)")
+                    timeout = 90 # Timeout estendido para 90 segundos
+                    print(f"Conectando Rohden AI em: {target_url} (Tentativa {attempt+1}/{retries})")
 
-                import urllib3
-                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                    import urllib3
+                    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-                response = requests.post(
-                    target_url,
-                    json=payload,
-                    headers=self.rohden_headers,
-                    timeout=timeout,
-                    verify=False
-                )
+                    response = requests.post(
+                        target_url,
+                        json=payload,
+                        headers=self.rohden_headers,
+                        timeout=timeout,
+                        verify=False
+                    )
 
-                if response.status_code == 200:
-                    if url in self._degraded_urls:
-                        del self._degraded_urls[url]
-                    try:
-                        res_json = response.json()
-                        return res_json.get("response", "").strip()
-                    except Exception:
-                        return response.text.strip()
+                    if response.status_code == 200:
+                        res_data = response.json()
+                        if is_chat_api:
+                            ai_text = res_data.get("message", {}).get("content", "").strip()
+                        else:
+                            ai_text = res_data.get("response", "").strip()
+                        
+                        if ai_text:
+                            return ai_text
+                    
+                    # Se der 405 ou 404, tenta o endpoint de chat com o payload correto
+                    elif response.status_code in [404, 405] and '/api/generate' in target_url:
+                        alt_url = target_url.replace('/api/generate', '/api/chat')
+                        print(f"Status {response.status_code} detectado. Tentando alternativa: {alt_url}")
+                        
+                        # Reconstroi o payload para o formato de chat se necessário
+                        chat_payload = {
+                            "model": self.ai_model,
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": prompt}
+                            ],
+                            "stream": False,
+                            "options": payload.get("options", {})
+                        }
+                        
+                        response = requests.post(alt_url, json=chat_payload, headers=self.rohden_headers, timeout=timeout, verify=False)
+                        if response.status_code == 200:
+                            res_data = response.json()
+                            return res_data.get("message", {}).get("content", "").strip() or res_data.get("response", "").strip()
 
-                last_error = f"Status {response.status_code}"
-                fail_time, count = self._degraded_urls.get(url, (now, 0))
-                self._degraded_urls[url] = (now, count + 1)
-            except Exception as e:
-                last_error = str(e)
-                if "timed out" in str(e).lower():
-                    print(f"TIMEOUT em {url} após {timeout}s.")
-                else:
-                    print(f"Falha ao conectar em {url}: {str(e)}")
-                
-                fail_time, count = self._degraded_urls.get(url, (now, 0))
-                self._degraded_urls[url] = (now, count + 1)
-                continue
+                    print(f"Erro na Rohden AI ({target_url}): Status {response.status_code}")
+                    
+                except Exception as e:
+                    print(f"Falha na conexão com {target_url}: {str(e)}")
+            
+            # Se todas as URLs falharam, espera antes do próximo retry
+            if attempt < retries - 1:
+                time.sleep(2)
 
         return ""
 
@@ -551,12 +647,31 @@ class LlamaEngine:
         return None
 
     def _validate_query_plan(self, plan: Dict[str, Any], tables: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """
+        Valida o plano de consulta técnica. 
+        IMPORTANTE: Não retorna mensagens para o usuário final aqui.
+        Retorna apenas códigos técnicos de erro para que a IA decida como responder.
+        """
         if not plan:
-            return None, "Posso ajudar com consultas a dados. O que voce precisa?"
-        if str(plan.get('type', '')).upper() == 'NONE':
-            return None, "Posso ajudar com consultas a dados. O que voce precisa?"
-        if plan.get('type') != 'SELECT':
-            return None, "Plano invalido."
+            return None, "ERR_PLAN_EMPTY"
+        
+        plan_type = str(plan.get('type', '')).upper()
+        if plan_type == 'NONE':
+            return None, "ERR_PLAN_NONE"
+        
+        # Suporte a SQL bruto injetado pelo fallback do extrator
+        if plan_type == 'RAW_SQL':
+            sql = plan.get('sql', '').upper()
+            if not sql.startswith('SELECT'):
+                return None, "ERR_RAW_SQL_NOT_SELECT"
+            # Validação mínima de segurança
+            forbidden = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'TRUNCATE', 'ALTER', 'GRANT']
+            if any(cmd in sql for cmd in forbidden):
+                return None, "ERR_RAW_SQL_FORBIDDEN_CMD"
+            return plan, None
+
+        if plan_type != 'SELECT':
+            return None, "ERR_PLAN_INVALID_TYPE"
 
         table_map = {}
         for table in tables:
@@ -575,7 +690,7 @@ class LlamaEngine:
 
         table_name = plan.get('table')
         if table_name not in table_map:
-            return None, "Tabela nao autorizada."
+            return None, f"ERR_TABLE_NOT_AUTHORIZED:{table_name}"
 
         schema = plan.get('schema') or table_map[table_name]['schema']
         plan['schema'] = schema
@@ -598,6 +713,8 @@ class LlamaEngine:
         filters = plan.get('filters') or []
         sanitized_filters = []
         for flt in filters:
+            if not flt or not isinstance(flt, dict):
+                continue
             field = flt.get('field')
             if not field:
                 continue
@@ -607,12 +724,19 @@ class LlamaEngine:
             op = str(flt.get('op', '=')).upper()
             if op not in ('=', 'LIKE', '>', '>=', '<', '<='):
                 op = '='
+            
             value = flt.get('value')
+            case_insensitive = bool(flt.get('case_insensitive'))
+            
+            # Reforço de segurança: se for LIKE, forçamos case_insensitive para melhor UX
+            if op == 'LIKE':
+                case_insensitive = True
+                
             sanitized_filters.append({
                 'field': column_map[key],
                 'op': op,
                 'value': value,
-                'case_insensitive': bool(flt.get('case_insensitive')),
+                'case_insensitive': case_insensitive,
                 'normalize': flt.get('normalize')
             })
         plan['filters'] = sanitized_filters
@@ -655,9 +779,9 @@ class LlamaEngine:
         sys += "Vá direto ao ponto: responda de forma natural, como se estivesse conversando com um colega de trabalho.\n"
         sys += "Seja inteligente: varie suas respostas e use emojis de forma equilibrada para manter o tom leve.\n\n"
         
-        # Se não houver tabelas relevantes, não enviamos nada de metadados
+        # Se não houver tabelas relevantes, o assistente apenas conversa
         if not relevant_tables:
-            return sys + "Responda de forma prestativa. No momento, você não tem acesso a dados específicos para esta pergunta, mas pode conversar normalmente."
+            return sys + "Responda de forma prestativa e humana. Você está em modo de conversa geral no momento."
 
         # Se houver tabelas, enviamos apenas os nomes e descrições primeiro
         sys += "\nCONHECIMENTO DISPONÍVEL (DADOS):\n"
@@ -679,195 +803,359 @@ class LlamaEngine:
         return sys
 
     def generate_response(self, prompt, username=None, history=None):
-        """Gera uma resposta humana baseada na consulta SQL e resultados"""
+        """
+        Gera uma resposta baseada na arquitetura contextual:
+        1. IA Principal classifica e decide (CHAT ou DATA_ANALYSIS)
+        2. Execução da ação decidida pela IA
+        
+        REGRA DE OURO (ZERO HARDCODE): 
+        - É PROIBIDO o uso de strings de resposta hardcoded (fallbacks).
+        - Toda e qualquer resposta ao usuário deve vir da IA ou ser formatada com base em dados reais.
+        - Em caso de erro técnico, a IA deve ser consultada para explicar o erro ao usuário de forma humana.
+        """
         import time
         start_time = time.time()
+        
+        # 0. Contexto de Memória (Estado do Usuário)
+        user_memory = ""
+        if username:
+            try:
+                user_memory = memoria_system.get_user_memory_context(username)
+            except Exception:
+                pass
 
-        # Processamento de histórico baseado na configuração
+        # Configuração de contexto de chat
         try:
             from ..CONFIG.context_config import CONTEXT_CONFIG
         except ImportError:
-            # Fallback caso a config não seja encontrada
             CONTEXT_CONFIG = {
-                "max_history_messages": 5,
-                "max_chars_per_message": 400,
+                "max_history_messages": 8,
+                "max_chars_per_message": 500,
                 "include_technical_metadata": True,
                 "use_ellipsis": True
             }
 
+        # Processamento de histórico
+        processed_history = []
         if history and isinstance(history, list):
-            # Limitar quantidade de mensagens
             history = history[-CONTEXT_CONFIG["max_history_messages"]:]
-            
             for msg in history:
                 if isinstance(msg, dict) and 'content' in msg:
                     content = msg['content']
                     max_chars = CONTEXT_CONFIG["max_chars_per_message"]
-                    
-                    # Truncar se necessário
                     if len(content) > max_chars:
-                        suffix = "..." if CONTEXT_CONFIG["use_ellipsis"] else ""
-                        msg['content'] = content[:max_chars] + suffix
+                        content = content[:max_chars] + "..."
                     
-                    # Adiciona metadados de tabelas se configurado e disponível
-                    if CONTEXT_CONFIG["include_technical_metadata"]:
-                        tabelas = msg.get('metadata', {}).get('tabelas_usadas', [])
-                        if not tabelas and 'tabelas_usadas' in msg: # Fallback para metadados achatados
-                            tabelas = msg['tabelas_usadas']
-                            
-                        if tabelas:
-                            msg['content'] += f" [Contexto interno: tabelas {', '.join(tabelas)}]"
-        
-        # Objeto de metadados para persistência
+                    processed_history.append({
+                        'role': msg.get('role', 'user'),
+                        'content': content,
+                        'metadata': msg.get('metadata', {})
+                    })
+
         metadata = {
             'tabelas_usadas': [],
             'intencao': None,
-            'confianca': 0
+            'user_memory_active': bool(user_memory)
         }
-        
+
         try:
-            # Recarregar tabelas treinadas para garantir dados atualizados
+            # 1. CARREGAR TABELAS DISPONÍVEIS
             from ..DATA.storage import storage
-            config = storage.load_tables()
+            config_tables = storage.load_tables()
             
-            try:
-                # 1. VERIFICA TREINAMENTO (Rápido, Determinístico e Focado em Business Intelligence)
-                # Sempre priorizamos o que já foi ensinado ao sistema.
-                trained_plan = self._find_trained_plan(prompt)
-                
-                # 2. FLUXO UNIFICADO (Agentic Flow - IA Decide Tudo)
-                # Se não houver treino, a IA interpreta a pergunta, identifica tabelas e decide a ação.
-                ai_analysis = None
-                if not trained_plan:
-                    ai_analysis = self._unified_ai_analysis(prompt, config)
-                    
-                # LOG DE INTELIGÊNCIA: Ver o que o sistema decidiu
-                print(f"--- LOG DE INTELIGÊNCIA ---")
-                print(f"Prompt: {prompt}")
-                if trained_plan:
-                    print(f"Ação: QUERY (Via Treinamento)")
-                elif ai_analysis:
-                    print(f"Ação Decidida: {ai_analysis.get('action')}")
-                print(f"---------------------------")
-
-                # 3. PROCESSAR RESULTADO DA IA OU TREINO
-                if not trained_plan:
-                    if not ai_analysis:
-                        return {
-                            'text': "Não consegui me conectar ao motor de inteligência. Por favor, verifique se o servidor Rohden AI está disponível.",
-                            'metadata': metadata
-                        }
-                    
-                    if ai_analysis.get('action') == 'CHAT':
-                        return {'text': ai_analysis.get('text', 'Olá! Como posso ajudar?'), 'metadata': metadata}
-                    
+            # 2. ANÁLISE E DECISÃO PELA IA (Unificada)
+            # Passamos o prompt, tabelas, histórico e agora a memória do usuário
+            full_context_prompt = f"{user_memory}\n\nPergunta do Usuário: {prompt}" if user_memory else prompt
+            ai_analysis = self._unified_ai_analysis(full_context_prompt, config_tables, history=processed_history, username=username)
+            
+            action = None
+            chat_text = None
+            query_plan = None
+            
+            if ai_analysis and isinstance(ai_analysis, dict):
+                action = ai_analysis.get('action', '').upper()
+                if action == 'CHAT':
+                    chat_text = ai_analysis.get('text')
+                elif action == 'DATA_ANALYSIS' or action == 'QUERY':
+                    action = 'DATA_ANALYSIS'
+                    metadata['intencao'] = 'DATA_ANALYSIS'
                     query_plan = ai_analysis.get('plan')
-                else:
+
+            # 3. FALLBACK PARA TREINAMENTO ESPECÍFICO (Se a IA for incerta sobre o plano de dados)
+            if not action or (action == 'DATA_ANALYSIS' and not query_plan):
+                trained_plan = self._find_trained_plan(prompt)
+                if trained_plan:
                     query_plan = trained_plan
+                    action = 'DATA_ANALYSIS'
+                    metadata['intencao'] = 'DATA_ANALYSIS'
+                elif not action:
+                    action = 'CHAT' # Default para chat se nada for decidido, mas o texto virá da IA
 
-                # 4. VALIDAÇÃO E EXECUÇÃO (Determinístico)
-                if not query_plan:
-                    return {
-                        'text': "Não consegui identificar uma ação clara para sua pergunta. Pode ser mais específico?",
-                        'metadata': metadata
-                    }
-
-                validated_plan, plan_error = self._validate_query_plan(query_plan, config)
+            # 4. EXECUÇÃO DA AÇÃO DECIDIDA
+            
+            # FLUXO: CHAT
+            if action == 'CHAT':
+                # Se não temos texto da IA ainda, pedimos um agora (garante zero hardcode)
+                if not chat_text:
+                    chat_text = self._call_ai(full_context_prompt, self._get_optimized_system_prompt([], {}))
+                return {'text': chat_text, 'metadata': metadata}
+            
+            # FLUXO: DATA_ANALYSIS
+            if action == 'DATA_ANALYSIS':
+                # Validação do plano
+                validated_plan, plan_error = self._validate_query_plan(query_plan, config_tables)
 
                 if not validated_plan:
-                    erro_texto = plan_error or "Não consegui identificar quais dados consultar."
-                    return {
-                        'text': erro_texto,
-                        'metadata': metadata
-                    }
+                    # Se o plano falhou, pedimos à IA para explicar o erro técnico (plan_error) de forma humana
+                    error_msg = f"Ocorreu um problema técnico ao tentar acessar os dados: {plan_error}. Por favor, explique isso ao usuário de forma amigável e peça mais detalhes se necessário."
+                    fallback_text = self._call_ai(error_msg, self._get_optimized_system_prompt([], {}))
+                    return {'text': fallback_text, 'metadata': metadata}
 
-                # 5. EXECUÇÃO NO BANCO DE DADOS
+                # Execução SQL
                 if validated_plan.get('table') and validated_plan['table'] not in metadata['tabelas_usadas']:
                     metadata['tabelas_usadas'].append(validated_plan['table'])
 
                 try:
-                    sql_query, params, dialect = SQLBuilder.from_plan(validated_plan).build()
-                    print(f"--- SQL GERADO ---\nQuery: {sql_query}\nParams: {params}\n------------------")
+                    if validated_plan.get('type') == 'RAW_SQL':
+                        sql_query = validated_plan.get('sql')
+                        params = []
+                        dialect = 'oracle'
+                    else:
+                        sql_query, params, dialect = SQLBuilder.from_plan(validated_plan).build()
                 except Exception as build_err:
-                    return {
-                        'text': f"Erro ao montar a consulta: {str(build_err)}",
-                        'metadata': metadata
-                    }
+                    error_msg = f"Erro ao montar SQL: {str(build_err)}. Explique isso ao usuário de forma humana."
+                    fallback_text = self._call_ai(error_msg, self._get_optimized_system_prompt([], {}))
+                    return {'text': fallback_text, 'metadata': metadata}
 
+                # Persiste para treinamento futuro
                 self._store_training(prompt, validated_plan, sql_query, username)
 
-                # Executar o SQL
-                sql_exec_start = time.time()
+                # Executa no banco
                 sql_result = self.execute_sql(sql_query, params=params, dialect=dialect)
-                print(f"Execução SQL levou: {time.time() - sql_exec_start:.3f}s")
 
-                # Pós-processamento determinístico
+                # ESTRATÉGIA DE RETENTATIVA ABRANGENTE (Se retornar vazio)
+                if not sql_result and action == 'DATA_ANALYSIS':
+                    print(f"⚠️ Busca restritiva retornou 0 resultados. Tentando busca abrangente...")
+                    retry_prompt = f"A busca por '{prompt}' não retornou nada. Sugira um novo plano SQL muito mais simples e abrangente (ex: apenas pelo primeiro nome ou apenas pelo sobrenome) para encontrarmos candidatos na tabela."
+                    target_table = next((t for t in tables if t.get('table_name').upper() == validated_plan.get('table').upper()), None)
+                    if target_table:
+                        broader_plan = self._generate_data_plan(retry_prompt, target_table, history, username)
+                        if broader_plan and broader_plan.get('plan'):
+                            try:
+                                sql_query_2, params_2, _ = SQLBuilder.from_plan(broader_plan.get('plan')).build(dialect)
+                                sql_result = self.execute_sql(sql_query_2, params=params_2, dialect=dialect)
+                                if sql_result:
+                                    print(f"✅ Busca abrangente encontrou {len(sql_result)} candidatos.")
+                                    validated_plan = broader_plan.get('plan') # Atualiza o plano para formatação correta
+                            except:
+                                pass
+
+                # Formatação da resposta
                 if isinstance(sql_result, str):
-                    response = sql_result
+                    # Se sql_result for string, provavelmente é uma mensagem de erro do banco
+                    error_msg = f"O banco de dados retornou um erro: {sql_result}. Explique isso de forma humana."
+                    response = self._call_ai(error_msg, self._get_optimized_system_prompt([], {}))
                 else:
+                    # NOVA LÓGICA: Verifica se há excesso de resultados antes de humanizar normalmente
+                    try:
+                        from ..CONFIG.ai_temperature_config import handle_excessive_results
+                        refinement_question = handle_excessive_results(prompt, sql_result, self)
+                        if refinement_question:
+                            return {'text': refinement_question, 'metadata': metadata}
+                    except Exception as e:
+                        print(f"⚠️ Erro ao processar refinamento de resultados: {e}")
+
                     response = self._format_results(validated_plan, sql_result)
+                    # Humanização dos dados (Sempre via IA conforme regra de zero hardcode)
+                    try:
+                        response = self._humanize_response(prompt, sql_result, response)
+                    except Exception:
+                        pass # Mantém o response bruto apenas em falha crítica da IA
 
-                # IA opcional apenas para linguagem
-                use_ai_language = os.getenv("ROHDEN_AI_LANGUAGE_ONLY", "false").lower() in ("1", "true", "yes")
-                if use_ai_language and not isinstance(sql_result, str):
-                    response = self._humanize_response(prompt, sql_result, response)
-
-                # 6. VERIFICAR APRENDIZADO (Tag [LEARN])
-                learn_match = re.search(r'\[LEARN\]\s*(.*?)\s*\[/LEARN\]', response, re.DOTALL | re.IGNORECASE)
-                if learn_match:
-                    self.learn_fact(learn_match.group(1).strip(), username)
-                    response = re.sub(r'\[LEARN\].*?\[/LEARN\]', '', response, flags=re.DOTALL | re.IGNORECASE).strip()
-                
-                # 7. APRENDIZADO AUTOMÁTICO CONVERSACIONAL (controlado com cache)
+                # Aprendizado Automático
                 if username and prompt:
                     memoria_system.extract_learning_from_interaction(username, prompt, response)
                     
                 return {'text': response, 'metadata': metadata}
 
-            except Exception as e:
-                raise e # Repassa para o try externo
+            # Última instância: se chegar aqui sem ação (raro), pede socorro à IA
+            final_fallback = self._call_ai(f"Não consegui processar a pergunta: '{prompt}'. Responda de forma amigável pedindo para eu reformular.", self._get_optimized_system_prompt([], {}))
+            return {'text': final_fallback, 'metadata': metadata}
+
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return {'text': f"Desculpe, encontrei um erro ao processar sua pergunta: {str(e)}", 'metadata': metadata}
+            # Em caso de erro crítico, a IA ainda tenta dar a última palavra
+            try:
+                critical_error_msg = f"Erro crítico no sistema: {str(e)}. Por favor, peça desculpas ao usuário em nome do Rohden AI e diga que estamos trabalhando nisso."
+                ai_apology = self._call_ai(critical_error_msg, "Você é o Rohden AI.")
+                return {'text': ai_apology, 'metadata': metadata}
+            except:
+                # Se até a IA falhar na desculpa, retornamos uma mensagem mínima técnica
+                # Mas como o usuário quer zero hardcode, tentamos manter o mais neutro possível
+                return {'text': "Não consegui processar sua solicitação agora. Por favor, tente novamente.", 'metadata': metadata}
 
 
-    def _unified_ai_analysis(self, prompt: str, tables: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """
-        FLUXO UNIFICADO: Decide se é CHAT ou QUERY e já gera a resposta ou plano técnico.
-        """
-        catalog = self._build_table_catalog(tables)
+    def _get_related_training_examples(self, prompt: str) -> str:
+        """Busca exemplos de treinamento relacionados à pergunta atual para guiar a IA"""
+        self._load_training_cache()
+        if not self._training_cache:
+            return ""
+
+        normalized = self._normalize_question(prompt)
+        q_words = set(normalized.split())
         
-        system_prompt = (
-            "Você é o Motor de Inteligência da Rohden AI. Sua missão é interpretar perguntas corporativas.\n"
-            "REGRAS DE OURO:\n"
-            "1. Se a pergunta for uma saudação (oi, olá, etc) ou conversa geral, responda com action: CHAT.\n"
-            "2. Se a pergunta exigir dados (nomes, contatos, setores, vendas, etc), responda com action: QUERY e monte o plano técnico.\n"
-            "3. Responda APENAS um JSON válido.\n\n"
-            "FORMATO DE RESPOSTA:\n"
-            "Para CHAT: {\"action\": \"CHAT\", \"text\": \"Sua resposta curta aqui\"}\n"
-            "Para QUERY: {\"action\": \"QUERY\", \"plan\": {\"type\": \"SELECT\", \"table\": \"NOME_TABELA\", \"fields\": [\"COLUNA\"], \"filters\": [], \"limit\": 50}}\n\n"
-            "DADOS DISPONÍVEIS:\n" + json.dumps(catalog, ensure_ascii=False)
-        )
+        matches = []
+        for item in self._training_cache:
+            t = item.get('q', '')
+            t_words = set(t.split())
+            union = q_words.union(t_words)
+            inter = q_words.intersection(t_words)
+            score = (len(inter) / len(union)) if union else 0.0
+            
+            if score > 0.4: # Score moderado para pegar exemplos variados
+                matches.append((score, item))
+        
+        matches.sort(key=lambda x: x[0], reverse=True)
+        
+        examples = ""
+        for score, item in matches[:3]: # Pega os 3 melhores exemplos
+            plan = item.get('plan')
+            if plan:
+                examples += f"- Pergunta: {item.get('q')}\n  Plano Sugerido: {json.dumps(plan, ensure_ascii=False)}\n"
+        
+        return examples
+
+    def _unified_ai_analysis(self, prompt: str, tables: List[Dict[str, Any]], history: List[Dict[str, Any]] = None, username: str = None) -> Optional[Dict[str, Any]]:
+        """
+        FLUXO UNIFICADO: A IA decide se é CHAT ou DATA_ANALYSIS.
+        Toda a decisão de fluxo é feita pela IA.
+        """
+        # 1. PREPARAR LISTA DE CAPACIDADES (Ultra simplificado)
+        trained_topics = [
+            f"- {t.get('table_name')}"
+            for t in tables 
+            if t.get('columns_info') and (t.get('table_description') or t.get('semantic_context'))
+        ]
+        topics_str = ", ".join(trained_topics) if trained_topics else "Nenhum tópico disponível."
+
+        # 2. CARREGAR CONHECIMENTO ADICIONAL (Reduzido)
+        learned_memory = self.get_learned_memory(username) if username else ""
+        if len(learned_memory) > 300: learned_memory = learned_memory[:300] + "..."
+        
+        # 3. FORMATAR HISTÓRICO (Apenas as 5 últimas mensagens para contexto)
+        history_context = ""
+        if history:
+            history_context = "\n### CONTEXTO RECENTE DA CONVERSA ###\n"
+            for msg in history[-5:]:
+                role = "USUÁRIO" if msg.get('role') == 'user' else "ROHDEN_AI"
+                content = msg.get('content', '')
+                history_context += f"[{role}]: {content[:200]}\n"
+            history_context += "### FIM DO CONTEXTO ###\n"
+
+        # 4. PROMPT DE DECISÃO (Ultra-Agressivo para Dados)
+        decision_system_prompt = load_prompt("intent_decision.txt", topics_str=topics_str)
 
         try:
-            # Uma única chamada com timeout configurado (15s/30s via call_ai_with_limits)
-            response = self._call_ai_with_limits(prompt, system_prompt, num_predict=512, num_ctx=2048, temperature=0.1)
+            # Chamada de Decisão (Mais robusta)
+            response = self._call_ai_with_limits(
+                prompt, 
+                decision_system_prompt + history_context, 
+                num_predict=250, 
+                num_ctx=2048,
+                temperature=0.0
+            )
+            print(f"🔍 DECISÃO DA IA (INTENÇÃO): '{response}'")
             
-            if not response:
-                return None
-            
-            data = self._extract_json(response)
-            if not data or 'action' not in data:
-                # Fallback se a IA não seguir o formato JSON
-                if len(response) < 100 and not "{" in response:
-                    return {"action": "CHAT", "text": response}
-                return None
+            decision = self._extract_json(response)
+            if not decision:
+                # Se a IA falhou no JSON, tentamos uma última vez com um prompt ainda mais agressivo e sem contexto de histórico
+                # para não confundir o modelo pequeno.
+                retry_prompt = (
+                    "Responda APENAS com este JSON preenchido:\n"
+                    "{\"action\": \"CHAT\", \"text\": \"Sua resposta aqui\"}\n"
+                    f"Pergunta do usuário: {prompt}"
+                )
+                response_retry = self._call_ai_with_limits(prompt, retry_prompt, num_predict=100, num_ctx=1024)
+                decision = self._extract_json(response_retry)
                 
-            return data
+                if not decision:
+                    # Se mesmo assim falhar, retornamos o texto bruto da segunda tentativa limpo
+                    return {"action": "CHAT", "text": response_retry.split('{')[0].strip()}
+            
+            action = decision.get('action', 'CHAT').upper()
+            
+            if action == 'CHAT':
+                return decision
+
+            # Se for DATA_ANALYSIS, precisamos construir o plano técnico
+            if action == 'DATA_ANALYSIS':
+                target_table_name = decision.get('target_table')
+                target_table = None
+                
+                if target_table_name:
+                    target_table = next((t for t in tables if t.get('table_name').upper() == target_table_name.upper()), None)
+                
+                if not target_table:
+                    relevant = self.discover_relevant_tables(prompt, tables, top_n=1)
+                    if not relevant: 
+                        response = self._call_ai_with_limits(prompt, "Explique que não temos dados sobre isso no momento.", num_predict=150, num_ctx=1024)
+                        return {"action": "CHAT", "text": response}
+                    target_table = relevant[0]
+
+                # Agora sim fazemos o "heavy lifting" apenas para a tabela selecionada
+                return self._generate_data_plan(prompt, target_table, history, username)
+
         except Exception as e:
-            print(f"Erro no Fluxo Unificado: {e}")
+            print(f"❌ ERRO na análise unificada: {e}")
             return None
+
+    def _generate_data_plan(self, prompt: str, table: Dict[str, Any], history: List[Dict[str, Any]], username: str) -> Optional[Dict[str, Any]]:
+        """Gera o plano técnico de SQL baseado no treinamento e catálogo da tabela."""
+        table_copy = table.copy()
+        all_cols = table_copy.get('columns_info', [])
+        
+        # Mantém as colunas originais mas garante que a descrição semântica esteja presente
+        catalog = self._build_table_catalog([table_copy])
+        
+        # 1. FORMATAR HISTÓRICO PARA O PLANO (Essencial para resolver pronomes e correções)
+        history_context = ""
+        if history:
+            history_context = "\n### CONTEXTO DA CONVERSA (USE PARA RESOLVER REFERÊNCIAS) ###\n"
+            for msg in history[-3:]: # As 3 últimas são suficientes para o plano
+                role = "USUÁRIO" if msg.get('role') == 'user' else "IA"
+                content = msg.get('content', '')
+                history_context += f"{role}: {content[:150]}\n"
+            history_context += "### FIM DO CONTEXTO ###\n"
+
+        # 2. Busca exemplos de treinamento específicos desta tabela
+        self._load_training_cache()
+        trained_examples = ""
+        if self._training_cache:
+            normalized = self._normalize_question(prompt)
+            q_words = set(normalized.split())
+            matches = []
+            for item in self._training_cache:
+                # Só usa exemplos que pertencem a esta tabela ou são muito similares
+                plan = item.get('plan', {})
+                if plan.get('table', '').upper() == table.get('table_name', '').upper():
+                    t = item.get('q', '')
+                    t_words = set(t.split())
+                    score = len(q_words.intersection(t_words)) / len(q_words.union(t_words)) if q_words.union(t_words) else 0
+                    if score > 0.2: matches.append((score, item))
+            
+            matches.sort(key=lambda x: x[0], reverse=True)
+            for _, item in matches[:3]:
+                trained_examples += f"Pergunta: {item.get('q')}\nPlano: {json.dumps(item.get('plan'))}\n"
+
+        plan_system_prompt = load_prompt(
+            "sql_plan_generation.txt",
+            catalog=json.dumps(catalog, ensure_ascii=False),
+            history_context=history_context,
+            trained_examples=trained_examples
+        )
+        
+        response = self._call_ai_with_limits(prompt, plan_system_prompt, num_predict=500, num_ctx=2048, temperature=0.0)
+        print(f"🔍 PLANO DE DADOS GERADO: '{response}'")
+        return self._extract_json(response)
 
     def perform_advanced_training(self, table_name, columns, samples):
         """Realiza o treinamento semântico avançado de uma tabela em uma única chamada de IA"""
@@ -902,9 +1190,9 @@ class LlamaEngine:
     def _call_ai(self, prompt, system_prompt):
         """
         Encapsula a chamada à IA com foco exclusivo nos servidores Rohden AI.
-        Usa tanto IP interno quanto URL pública conforme configurado.
+        Usa limites seguros para estabilidade do servidor GGUF.
         """
-        return self._call_ai_with_limits(prompt, system_prompt, num_predict=2048, num_ctx=4096, temperature=0.1)
+        return self._call_ai_with_limits(prompt, system_prompt, num_predict=800, num_ctx=2048, temperature=0.1)
 
 def get_llama_engine():
     return LlamaEngine()
