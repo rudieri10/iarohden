@@ -48,28 +48,26 @@ class VectorManager:
             path_prefix = parsed.path.split('/api/')[0].rstrip('/')
             host_url = f"{parsed.scheme}://{parsed.netloc}{path_prefix}"
             
-            # Lista de possíveis endpoints de embedding (Ollama, Llama.cpp, OpenAI-style)
+            # Lista de possíveis endpoints de embedding (Ollama novo, Ollama antigo, OpenAI-style)
             endpoints = [
-                f"{host_url}/api/embeddings",
-                f"{host_url}/v1/embeddings",
-                f"{host_url}/embeddings",
-                f"{host_url}/embedding"
+                f"{host_url}/api/embed",       # Ollama moderno
+                f"{host_url}/api/embeddings",  # Ollama antigo
+                f"{host_url}/v1/embeddings",   # OpenAI/Llama.cpp
+                f"{host_url}/embeddings"       # Custom
             ]
             
-            # Adiciona os base_url originais com replace caso não sejam apenas host/porta
-            if "/api/generate" in base_url:
-                endpoints.insert(0, base_url.replace('/api/generate', '/api/embeddings'))
-                endpoints.insert(1, base_url.replace('/api/generate', '/v1/embeddings'))
-            
-            # Remover duplicatas mantendo a ordem
-            endpoints = list(dict.fromkeys(endpoints))
-            
             for emb_url in endpoints:
-                # Tenta até 2 vezes por endpoint
-                for attempt in range(2):
+                # Tenta até 3 vezes por endpoint com backoff exponencial simples
+                for attempt in range(3):
                     try:
-                        # Formato Ollama (/api/embeddings)
-                        if '/api/embeddings' in emb_url:
+                        # Formato Ollama Moderno (/api/embed)
+                        if '/api/embed' in emb_url:
+                            payload = {
+                                "model": os.getenv("ROHDEN_AI_MODEL", "llama3.1-gguf"),
+                                "input": clean_text
+                            }
+                        # Formato Ollama Antigo (/api/embeddings)
+                        elif '/api/embeddings' in emb_url:
                             payload = {
                                 "model": os.getenv("ROHDEN_AI_MODEL", "llama3.1-gguf"),
                                 "prompt": clean_text
@@ -82,7 +80,7 @@ class VectorManager:
                                 "encoding_format": "float"
                             }
                             
-                        response = requests.post(emb_url, json=payload, headers=self.headers, timeout=10)
+                        response = requests.post(emb_url, json=payload, headers=self.headers, timeout=15)
                         
                         if response.status_code == 200:
                             data = response.json()
@@ -90,31 +88,38 @@ class VectorManager:
                             embedding = data.get("embedding")
                             if not embedding and "data" in data and isinstance(data["data"], list):
                                 embedding = data["data"][0].get("embedding")
+                            
+                            # Caso específico do /api/embed do Ollama que pode retornar uma lista de listas
+                            if embedding and isinstance(embedding, list) and len(embedding) > 0:
+                                if isinstance(embedding[0], list):
+                                    embedding = embedding[0]
                                 
                             if embedding and isinstance(embedding, list) and len(embedding) > 0:
                                 # LIMPEZA E VALIDAÇÃO: Garantir que todos os elementos sejam floats
                                 try:
-                                    clean_vector = []
-                                    for x in embedding:
-                                        if x is None: continue
-                                        try:
-                                            clean_vector.append(float(x))
-                                        except (ValueError, TypeError):
-                                            continue
-                                    
+                                    clean_vector = [float(x) for x in embedding if x is not None]
                                     if len(clean_vector) > 0:
-                                        # Salvar no Cache
                                         self._embedding_cache[cache_key] = clean_vector
                                         return clean_vector
                                 except Exception as e:
                                     print(f"Erro ao processar vetor da API: {str(e)}")
+                        
+                        elif response.status_code in [502, 503, 504, 429]:
+                            # Erros de servidor ou rate limit: espera um pouco e tenta novamente
+                            import time
+                            wait_time = (attempt + 1) * 2
+                            time.sleep(wait_time)
+                            continue
                         else:
-                            if attempt == 1:
-                                print(f"Erro na API em {emb_url} (Status {response.status_code})")
+                            if attempt == 2:
+                                print(f"Erro persistente na API em {emb_url} (Status {response.status_code})")
                         
                     except Exception as e:
-                        if attempt == 1 and emb_url == endpoints[-1]: # Loga apenas na última falha total daquela URL base
-                            print(f"Aviso: Servidor {base_url} indisponível ou recusou conexão. Verifique se o serviço Rohden AI está rodando.")
+                        if attempt == 2:
+                            if emb_url == endpoints[-1]:
+                                print(f"Aviso: Servidor {base_url} indisponível. Erro: {str(e)}")
+                        import time
+                        time.sleep(1)
                         continue
         
         return None

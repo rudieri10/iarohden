@@ -113,6 +113,11 @@
         font-size: 0.8rem;
         font-weight: 500;
     }
+
+    .x-small-badge {
+        font-size: 0.65rem;
+        padding: 2px 6px;
+    }
     
     .status-trained {
         background: #d4edda;
@@ -235,13 +240,89 @@
         .markdown-body h6:first-child {
             margin-top: 0 !important;
         }
+        
+        .ai-data-card {
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            margin-bottom: 20px;
+            border: 1px solid #eef2f7;
+            background: #fff;
+            transition: transform 0.2s;
+        }
+        
+        .ai-data-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(0,0,0,0.1);
+        }
+        
+        .ai-data-header {
+            padding: 15px 20px;
+            border-bottom: 1px solid #f0f2f5;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .ai-data-body {
+            padding: 20px;
+        }
+        
+        .badge-pattern {
+            background-color: #f1f8ff;
+            color: #0366d6;
+            border: 1px solid #c8e1ff;
+            font-size: 0.75rem;
+            margin-right: 5px;
+            margin-bottom: 5px;
+            padding: 4px 8px;
+            border-radius: 6px;
+            display: inline-block;
+        }
+        
+        .flow-step {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .flow-step-icon {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: #0066cc;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 15px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+        
+        .flow-arrow {
+            width: 2px;
+            height: 20px;
+            background: #e1e4e8;
+            margin-left: 14px;
+            margin-top: -5px;
+            margin-bottom: 5px;
+        }
     </style>
 
 <!-- Overlay de Carregamento -->
 <div id="loadingOverlay" class="loading-overlay">
     <div class="spinner-border text-primary loading-spinner" role="status"></div>
     <h4 id="loadingMessage">Treinamento iniciado...</h4>
-    <p class="text-muted">A IA está realizando a análise avançada da tabela.</p>
+    <div class="w-50 mt-3">
+        <div class="progress" style="height: 20px; border-radius: 10px;">
+            <div id="trainingProgressBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%">0%</div>
+        </div>
+        <div class="d-flex justify-content-between mt-2">
+            <small id="trainingStatus" class="text-muted">Iniciando análise...</small>
+            <small id="trainingTime" class="text-primary fw-bold"></small>
+        </div>
+    </div>
+    <p class="text-muted mt-3">A IA está realizando a análise avançada da tabela e gerando padrões semânticos.</p>
 </div>
 
 <div class="container-fluid px-4 py-4">
@@ -404,22 +485,35 @@
 
         <!-- Aba 2: Dados da IA (Relatórios) -->
         <div class="tab-pane fade" id="data" role="tabpanel">
-            <h3 class="fw-bold text-dark mb-4">
-                <i class="bi bi-graph-up me-2 text-primary"></i>
-                Relatórios da IA
-            </h3>
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h3 class="fw-bold text-dark mb-0">
+                    <i class="bi bi-graph-up me-2 text-primary"></i>
+                    Relatórios da IA
+                </h3>
+                <div class="d-flex align-items-center" style="min-width: 300px;">
+                    <label class="form-label me-2 mb-0 fw-bold">Fonte:</label>
+                    <select class="form-select" id="aiDataSourceSelect" onchange="renderAIData()">
+                        <option value="all">Visão Geral do Cérebro</option>
+                    </select>
+                </div>
+            </div>
             
-            <div class="row" id="summaryContent">
-                <div class="loading-container">
-                    <div class="spinner-border text-primary" role="status">
-                        <span class="visually-hidden">Carregando...</span>
+            <div id="aiDataContent">
+                <div class="row" id="summaryContent">
+                    <div class="loading-container">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Carregando...</span>
+                        </div>
+                        <span class="ms-2">Carregando dados da IA...</span>
                     </div>
-                    <span class="ms-2">Carregando dados da IA...</span>
                 </div>
             </div>
         </div>
     </div>
 </div>
+
+<!-- Scripts Adicionais -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
 <script>
     let trainedTables = [];
@@ -428,6 +522,7 @@
     let availableSchemas = [];
     let currentSchema = '';
     let allOracleTables = [];
+    let cachedAIData = null;
 
     // Inicialização quando a página carrega
     document.addEventListener('DOMContentLoaded', function() {
@@ -436,7 +531,357 @@
         loadTables();
         loadTrainingStats();
         setupUploadArea();
+        syncTrainingStatus(); // Novo: Sincronizar treinamentos em curso
+        
+        // Listener para aba de Dados da IA
+        const dataTab = document.getElementById('data-tab');
+        if (dataTab) {
+            dataTab.addEventListener('click', loadAIData);
+        }
     });
+
+    // Novo: Sincronizar status de treinamentos do servidor
+    async function syncTrainingStatus() {
+        try {
+            const response = await fetch('/config_rohden_ai/training_status');
+            const status = await response.json();
+            
+            // Mesclar com o mapa local
+            Object.assign(trainingStatusMap, status);
+            
+            // Se houver algum treinamento ativo, iniciar o monitor
+            const hasActive = Object.values(trainingStatusMap).some(t => !t.done);
+            if (hasActive) {
+                console.log('Detectados treinamentos ativos no servidor, iniciando monitor...');
+                startGlobalTrainingMonitor();
+            }
+        } catch (error) {
+            console.error('Erro ao sincronizar status de treinamento:', error);
+        }
+    }
+
+    async function loadAIData() {
+        const container = document.getElementById('summaryContent');
+        const select = document.getElementById('aiDataSourceSelect');
+        
+        container.innerHTML = `
+            <div class="loading-container w-100">
+                <div class="spinner-border text-primary" role="status"></div>
+                <span class="ms-2">Consultando cérebro da IA...</span>
+            </div>
+        `;
+
+        try {
+            const response = await fetch('/config_rohden_ai/get_ai_data');
+            const data = await response.json();
+            
+            if (data.error) throw new Error(data.error);
+            
+            cachedAIData = data;
+
+            // Popular o select com as tabelas treinadas que possuem dados
+            const currentValue = select.value;
+            select.innerHTML = '<option value="all">🧠 Visão Geral do Cérebro</option>';
+            
+            // Filtrar apenas tabelas que possuem dados
+            const validTables = (data.tables || []).filter(t => t.record_count > 0);
+            
+            validTables.forEach(table => {
+                const option = document.createElement('option');
+                option.value = table.table_name;
+                option.textContent = `📊 Tabela: ${table.table_name}`;
+                select.appendChild(option);
+            });
+            
+            // Manter a seleção se ela ainda existir
+            if (Array.from(select.options).some(opt => opt.value === currentValue)) {
+                select.value = currentValue;
+            }
+
+            renderAIData();
+        } catch (error) {
+            console.error('Erro ao carregar dados da IA:', error);
+            container.innerHTML = `
+                <div class="alert alert-danger mx-3">
+                    <i class="bi bi-exclamation-triangle me-2"></i>
+                    Erro ao carregar dados do cérebro da IA: ${error.message}
+                </div>
+            `;
+        }
+    }
+
+    function renderAIData() {
+        if (!cachedAIData) return;
+        
+        const container = document.getElementById('summaryContent');
+        const selectedTable = document.getElementById('aiDataSourceSelect').value;
+        const data = cachedAIData;
+        let html = '';
+
+        if (selectedTable === 'all') {
+            // 1. Resumo Geral
+            html += `
+                <div class="col-12 mb-4">
+                    <div class="card border-0 shadow-sm overflow-hidden" style="border-radius: 15px;">
+                        <div class="card-body p-0">
+                            <div class="bg-primary text-white p-4">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <h4 class="fw-bold mb-1">Cérebro Digital Rohden</h4>
+                                        <p class="mb-0 opacity-75">Estado atual do aprendizado consolidado</p>
+                                    </div>
+                                    <i class="bi bi-cpu fs-1 opacity-25"></i>
+                                </div>
+                            </div>
+                            <div class="p-4 bg-white">
+                                <div class="row g-4 text-center">
+                                    <div class="col-md-3">
+                                        <div class="p-3 rounded bg-light border">
+                                            <div class="fs-3 fw-bold text-primary">${data.stats.total_tables}</div>
+                                            <div class="small text-muted text-uppercase fw-bold">Fontes de Dados</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="p-3 rounded bg-light border">
+                                            <div class="fs-3 fw-bold text-success">${data.stats.total_patterns}</div>
+                                            <div class="small text-muted text-uppercase fw-bold">Padrões Ativos</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="p-3 rounded bg-light border">
+                                            <div class="fs-3 fw-bold text-info">${data.stats.total_flows}</div>
+                                            <div class="small text-muted text-uppercase fw-bold">Fluxos Mapeados</div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="p-3 rounded bg-light border">
+                                            <div class="fs-3 fw-bold text-warning">${data.knowledge ? data.knowledge.length : 0}</div>
+                                            <div class="small text-muted text-uppercase fw-bold">Itens de Base</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // 2. Coluna da Esquerda: Padrões Comportamentais
+            html += '<div class="col-lg-7">';
+            
+            html += '<div class="d-flex justify-content-between align-items-center mb-3">';
+            html += '<h5 class="fw-bold mb-0"><i class="bi bi-robot me-2 text-primary"></i>Padrões de Resposta da IA</h5>';
+            html += `<span class="badge bg-light text-dark border">${data.patterns.length} padrões</span>`;
+            html += '</div>';
+
+            html += '<div class="card border-0 shadow-sm mb-4" style="border-radius: 12px;"><div class="card-body p-0">';
+            html += '<div class="list-group list-group-flush">';
+            
+            if (data.patterns.length === 0) {
+                html += '<div class="p-4 text-center text-muted">Nenhum padrão sintético gerado ainda.</div>';
+            }
+            
+            data.patterns.slice(0, 30).forEach((p, idx) => {
+                const isSuccess = p.success_indicator === 'SUCCESS' || p.success_count > 0;
+                const indicatorClass = isSuccess ? 'bg-success' : 'bg-warning';
+                const indicatorText = isSuccess ? 'Vetorizado' : 'Pendente';
+                
+                html += `
+                    <div class="list-group-item p-3 border-0 border-bottom">
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                            <div class="fw-bold text-dark small" style="max-width: 80%;">
+                                <i class="bi bi-chat-left-text me-2 text-primary opacity-50"></i>${p.user_input}
+                            </div>
+                            <span class="badge ${indicatorClass} x-small-badge">${indicatorText}</span>
+                        </div>
+                        <div class="p-2 bg-light rounded small text-muted mb-2" id="pattern-res-${idx}" style="border-left: 3px solid #dee2e6;">
+                            ${(p.ai_response || '').substring(0, 120)}${(p.ai_response || '').length > 120 ? '...' : ''}
+                        </div>
+                        ${(p.ai_response || '').length > 120 ? `
+                            <button class="btn btn-link btn-sm p-0 text-decoration-none x-small mb-2" 
+                                    onclick="toggleFullPattern(${idx}, '${btoa(p.ai_response || '')}')" id="btn-pattern-${idx}">
+                                <i class="bi bi-plus-circle me-1"></i>Ver resposta completa
+                            </button>
+                        ` : ''}
+                        <div class="d-flex flex-wrap gap-1">
+                            <span class="badge-pattern">${p.category || 'Geral'}</span>
+                            ${p.tags ? p.tags.split(',').map(t => `<span class="badge-pattern bg-white border">${t.trim()}</span>`).join('') : ''}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            if (data.patterns.length > 30) {
+                html += `
+                    <div class="p-3 text-center bg-light">
+                        <small class="text-primary fw-bold">E mais ${data.patterns.length - 30} padrões ativos no cérebro</small>
+                    </div>
+                `;
+            }
+            
+            html += '</div></div></div>';
+            html += '</div>';
+
+            // 3. Coluna da Direita: Fluxos e Conhecimento
+            html += '<div class="col-lg-5">';
+            
+            // Fluxos de Negócio
+            html += '<h5 class="fw-bold mb-3"><i class="bi bi-diagram-3 me-2 text-info"></i>Fluxos de Negócio</h5>';
+            html += '<div class="card border-0 shadow-sm mb-4" style="border-radius: 12px;"><div class="card-body p-3">';
+            
+            if (data.flows.length === 0) {
+                html += '<p class="text-muted small text-center py-3">Nenhum fluxo inter-tabelas detectado.</p>';
+            }
+            
+            data.flows.forEach(flow => {
+                const sequence = Array.isArray(flow.flow_sequence) ? flow.flow_sequence : (typeof flow.flow_sequence === 'string' ? JSON.parse(flow.flow_sequence) : []);
+                html += `
+                    <div class="mb-4 p-3 rounded border shadow-xs bg-white">
+                        <div class="fw-bold text-primary mb-3 d-flex align-items-center">
+                            <i class="bi bi-lightning-fill me-2 text-warning"></i>${flow.process_name}
+                        </div>
+                        <div class="ps-2">
+                            ${sequence.map((step, idx) => `
+                                <div class="flow-step">
+                                    <div class="flow-step-icon">${idx + 1}</div>
+                                    <div class="small fw-bold text-dark">${step}</div>
+                                </div>
+                                ${idx < sequence.length - 1 ? '<div class="flow-arrow"></div>' : ''}
+                            `).join('')}
+                        </div>
+                        ${flow.description ? `<div class="mt-3 small text-muted border-top pt-2 italic"><i class="bi bi-info-circle me-1"></i>${flow.description}</div>` : ''}
+                    </div>
+                `;
+            });
+            html += '</div></div>';
+
+            // Base de Conhecimento
+            html += '<h5 class="fw-bold mb-3"><i class="bi bi-journal-text me-2 text-warning"></i>Base de Conhecimento</h5>';
+            html += '<div class="card border-0 shadow-sm mb-4" style="border-radius: 12px;"><div class="card-body p-3">';
+            
+            if (!data.knowledge || data.knowledge.length === 0) {
+                html += '<p class="text-muted small text-center py-3">Nenhum conhecimento manual cadastrado.</p>';
+            } else {
+                data.knowledge.forEach(k => {
+                    html += `
+                        <div class="mb-3 pb-2 border-bottom">
+                            <div class="fw-bold small mb-1 text-dark">${k.title}</div>
+                            <div class="small text-muted mb-2">${k.content.substring(0, 100)}${k.content.length > 100 ? '...' : ''}</div>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span class="badge bg-light text-muted border x-small-badge">${k.category}</span>
+                                <small class="text-muted" style="font-size: 0.65rem;">${k.created_at ? new Date(k.created_at).toLocaleDateString() : ''}</small>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+            html += '</div></div>';
+            
+            html += '</div>';
+
+        } else {
+            // Visão de Tabela Específica
+            const table = data.tables.find(t => t.table_name === selectedTable);
+            if (!table) {
+                container.innerHTML = '<div class="alert alert-warning mx-3">Tabela não encontrada no cache.</div>';
+                return;
+            }
+
+            const summaryMd = (table.deep_profile && table.deep_profile.summary_markdown) ? table.deep_profile.summary_markdown : (table.table_description || '### Sem resumo detalhado disponível ainda.');
+
+            html += `
+                <div class="col-12 mb-4">
+                    <div class="card border-0 shadow-sm overflow-hidden" style="border-radius: 15px;">
+                        <div class="card-header bg-white p-4 border-bottom">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div class="d-flex align-items-center">
+                                    <div class="rounded-circle bg-primary bg-opacity-10 p-3 me-3">
+                                        <i class="bi bi-table text-primary fs-4"></i>
+                                    </div>
+                                    <div>
+                                        <h3 class="fw-bold text-dark mb-1">${table.table_name}</h3>
+                                        <p class="text-muted mb-0 small">Análise de Inteligência de Dados</p>
+                                    </div>
+                                </div>
+                                <div class="text-end">
+                                    <div class="badge bg-primary px-3 py-2 fs-6 mb-1">${table.record_count.toLocaleString()} registros</div>
+                                    <div class="small text-muted">Último treino: ${formatDate(table.updated_at)}</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-body p-4 markdown-body" style="background: #fff;">
+                            ${formatMarkdown(summaryMd)}
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Filtrar padrões relacionados a esta tabela
+            const tablePatterns = data.patterns.filter(p => 
+                (p.table_name === selectedTable) ||
+                (p.tags && p.tags.toLowerCase().includes(selectedTable.toLowerCase())) ||
+                (p.category && p.category.toLowerCase().includes(selectedTable.toLowerCase()))
+            );
+
+            if (tablePatterns.length > 0) {
+                html += `
+                    <div class="col-12">
+                        <div class="d-flex align-items-center mb-3">
+                            <h5 class="fw-bold mb-0 text-dark">
+                                <i class="bi bi-robot me-2 text-primary"></i>
+                                Padrões Semânticos Relacionados
+                            </h5>
+                            <span class="badge bg-primary bg-opacity-10 text-primary ms-2">${tablePatterns.length}</span>
+                        </div>
+                        <div class="row g-3">
+                `;
+                tablePatterns.forEach((p, idx) => {
+                    html += `
+                        <div class="col-md-6">
+                            <div class="card border-0 shadow-sm h-100" style="border-radius: 10px;">
+                                <div class="card-body p-3">
+                                    <div class="d-flex align-items-center mb-2">
+                                        <div class="bg-primary bg-opacity-10 rounded p-1 me-2">
+                                            <i class="bi bi-question-circle text-primary small"></i>
+                                        </div>
+                                        <div class="small fw-bold text-dark">Cenário / Pergunta</div>
+                                    </div>
+                                    <div class="small mb-3 text-muted ps-4">${p.user_input}</div>
+                                    
+                                    <div class="d-flex align-items-center mb-2">
+                                        <div class="bg-success bg-opacity-10 rounded p-1 me-2">
+                                            <i class="bi bi-check2-circle text-success small"></i>
+                                        </div>
+                                        <div class="small fw-bold text-dark">Resposta da IA</div>
+                                    </div>
+                                    <div class="p-2 bg-light rounded small text-muted ps-3 border-start border-success border-3">
+                                        ${p.ai_response}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+                html += '</div></div>';
+            }
+        }
+
+        container.innerHTML = html;
+    }
+
+    function toggleFullPattern(idx, base64Response) {
+        const div = document.getElementById(`pattern-res-${idx}`);
+        const btn = document.getElementById(`btn-pattern-${idx}`);
+        const fullResponse = atob(base64Response);
+        
+        if (btn.innerHTML.includes('bi-plus-circle')) {
+            div.innerText = fullResponse;
+            btn.innerHTML = '<i class="bi bi-dash-circle me-1"></i>Recolher resposta';
+        } else {
+            div.innerText = fullResponse.substring(0, 120) + '...';
+            btn.innerHTML = '<i class="bi bi-plus-circle me-1"></i>Ver resposta completa';
+        }
+    }
 
     // Carregar schemas disponíveis
     async function loadSchemas() {
@@ -611,25 +1056,29 @@
         const html = filteredTables.map(table => {
             const dateStr = formatDate(table.updated_at);
             const schema = table.schema || 'SYSROH';
+            const training = trainingStatusMap[table.name];
+            const isTraining = training && !training.done;
             
             return `
-                <div class="table-card trained-row" onclick="showTableDetails('${table.name}')" 
-                     style="cursor: pointer; border-left: 4px solid #28a745; min-height: 100px;">
+                <div class="table-card trained-row" data-table="${table.name}" onclick="showTableDetails('${table.name}')" 
+                     style="cursor: pointer; border-left: 4px solid ${isTraining ? '#17a2b8' : '#28a745'}; min-height: 100px;">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
                             <div class="table-name mb-1" style="font-size: 1rem; color: #2c3e50;">${table.name}</div>
                             <div class="small text-muted">
                                 <span class="badge bg-light text-dark border me-1">${schema}</span>
-                                <span class="badge bg-success-subtle text-success border-success-subtle">TREINADA</span>
+                                <span class="badge ${isTraining ? 'bg-info text-white' : 'bg-success'} badge-status">
+                                    ${isTraining ? `<span class="spinner-border spinner-border-sm me-1"></span>${training.percent}%` : 'TREINADA'}
+                                </span>
                             </div>
                         </div>
                         <div class="d-flex gap-1">
-                            ${!table.has_vector ? '<i class="bi bi-exclamation-triangle-fill text-warning" title="Sem Vetor"></i>' : '<i class="bi bi-check-circle-fill text-success" title="Vetor OK"></i>'}
-                            ${table.export_status && table.export_status.startsWith('Erro') ? '<i class="bi bi-x-circle-fill text-danger" title="Erro Exportação"></i>' : '<i class="bi bi-cloud-check-fill text-info" title="Sincronizada"></i>'}
+                            ${isTraining ? '' : (!table.has_vector ? '<i class="bi bi-exclamation-triangle-fill text-warning" title="Sem Vetor"></i>' : '<i class="bi bi-check-circle-fill text-success" title="Vetor OK"></i>')}
+                            ${isTraining ? '' : (table.export_status && table.export_status.startsWith('Erro') ? '<i class="bi bi-x-circle-fill text-danger" title="Erro Exportação"></i>' : '<i class="bi bi-cloud-check-fill text-info" title="Sincronizada"></i>')}
                         </div>
                     </div>
                     <div class="mt-auto d-flex justify-content-between align-items-center pt-2 border-top" style="font-size: 0.75rem;">
-                        <span class="text-muted"><i class="bi bi-clock me-1"></i>${dateStr}</span>
+                        <span class="text-muted"><i class="bi bi-clock me-1"></i>${isTraining ? 'Treinando agora...' : dateStr}</span>
                         <span class="text-primary fw-bold">Ver detalhes <i class="bi bi-chevron-right"></i></span>
                     </div>
                 </div>
@@ -655,20 +1104,27 @@
             return;
         }
 
-        const html = filteredTables.map(table => `
-            <div class="table-card">
-                <div class="table-header">
-                    <span class="table-name">${table.name}</span>
-                    <span class="badge bg-warning text-dark" style="font-size: 0.6rem;">PENDENTE</span>
+        const html = filteredTables.map(table => {
+            const training = trainingStatusMap[table.name];
+            const isTraining = training && !training.done;
+            
+            return `
+                <div class="table-card" data-table="${table.name}">
+                    <div class="table-header">
+                        <span class="table-name">${table.name}</span>
+                        <span class="badge ${isTraining ? 'bg-info text-white' : 'bg-warning text-dark'} badge-status" style="font-size: 0.6rem;">
+                            ${isTraining ? training.percent + '%' : 'PENDENTE'}
+                        </span>
+                    </div>
+                    <div class="table-meta mb-2">
+                        <i class="bi bi-diagram-2 me-1"></i>${table.schema}
+                    </div>
+                    <button class="btn ${isTraining ? 'btn-info disabled' : 'btn-primary'} btn-train" onclick="trainTable('${table.name}')">
+                        ${isTraining ? `<span class="spinner-border spinner-border-sm me-1"></span>${training.percent}%` : '<i class="bi bi-play-fill me-1"></i>Treinar Tabela'}
+                    </button>
                 </div>
-                <div class="table-meta mb-2">
-                    <i class="bi bi-diagram-2 me-1"></i>${table.schema}
-                </div>
-                <button class="btn btn-primary btn-train" onclick="trainTable('${table.name}')">
-                    <i class="bi bi-play-fill me-1"></i>Treinar Tabela
-                </button>
-            </div>
-        `).join('');
+            `;
+        }).join('');
         
         container.innerHTML = html;
     }
@@ -676,38 +1132,37 @@
     function formatMarkdown(text) {
         if (!text) return '';
         
-        // Substituir cabeçalhos (### e ####) por negrito destacado
+        try {
+            // Se o marked estiver disponível, usa ele para renderizar o Markdown completo
+            if (window.marked) {
+                return marked.parse(text);
+            }
+        } catch (e) {
+            console.warn('Erro ao usar marked.js, usando fallback:', e);
+        }
+        
+        // Fallback robusto se o marked falhar
         let formatted = text.replace(/### (.*)/g, '<h6 class="fw-bold mt-3 mb-2 text-primary border-bottom pb-1">$1</h6>');
         formatted = formatted.replace(/#### (.*)/g, '<div class="fw-bold mt-2 mb-1 text-dark small">$1</div>');
-        
-        // Substituir negrito (**text**)
         formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<strong class="text-dark">$1</strong>');
-        
-        // Substituir listas (- item)
         formatted = formatted.replace(/^- (.*)/gm, '<div class="ms-3 mb-1"><i class="bi bi-dot me-1"></i>$1</div>');
         
-        // Substituir tabelas markdown simples
         if (formatted.includes('|')) {
             const lines = formatted.split('\n');
-            let inTable = false;
             let tableHtml = '<div class="table-responsive"><table class="table table-sm table-bordered mt-2 x-small-table"><tbody>';
-            
             const processedLines = lines.map(line => {
                 if (line.includes('|')) {
                     const cells = line.split('|').filter(c => c.trim().length > 0 || line.indexOf('|') !== line.lastIndexOf('|'));
                     if (cells.length > 0 && !line.includes('---')) {
-                        let row = '<tr>' + cells.map(c => `<td>${c.trim()}</td>`).join('') + '</tr>';
-                        return row;
+                        return '<tr>' + cells.map(c => `<td>${c.trim()}</td>`).join('') + '</tr>';
                     }
                     return '';
                 }
                 return line;
             });
-            
             formatted = processedLines.join('\n');
         }
 
-        // Preservar quebras de linha
         return formatted.replace(/\n/g, '<br>');
     }
 
@@ -855,22 +1310,73 @@
         renderTrainedTables(trainedTables);
     }
 
+    // Monitor global de progresso
+    let trainingStatusMap = {};
+
+    function startGlobalTrainingMonitor() {
+        if (window.trainingMonitorInterval) return;
+        
+        window.trainingMonitorInterval = setInterval(async () => {
+            const trainingTables = Object.keys(trainingStatusMap).filter(name => !trainingStatusMap[name].done);
+            
+            if (trainingTables.length === 0) {
+                clearInterval(window.trainingMonitorInterval);
+                window.trainingMonitorInterval = null;
+                return;
+            }
+
+            for (const tableName of trainingTables) {
+                try {
+                    const resp = await fetch(`/config_rohden_ai/training_progress/${tableName}`);
+                    const data = await resp.json();
+                    
+                    trainingStatusMap[tableName] = data;
+                    
+                    // Atualizar UI do card se visível
+                    const card = document.querySelector(`.table-card[data-table="${tableName}"]`);
+                    if (card) {
+                        const btn = card.querySelector('.btn-train');
+                        const statusBadge = card.querySelector('.badge-status');
+                        
+                        if (data.done) {
+                            if (statusBadge) {
+                                statusBadge.className = 'badge bg-success badge-status';
+                                statusBadge.innerText = card.classList.contains('trained-row') ? 'TREINADA' : 'CONCLUÍDO';
+                            }
+                            if (btn) {
+                                btn.className = 'btn btn-success btn-train disabled';
+                                btn.innerHTML = '<i class="bi bi-check-circle me-1"></i>Concluído';
+                            }
+                            // Recarregar listas após conclusão
+                            loadTables();
+                        } else {
+                            if (btn) {
+                                btn.className = 'btn btn-info btn-train disabled';
+                                btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${data.percent}%`;
+                            }
+                            if (statusBadge) {
+                                statusBadge.className = 'badge bg-info text-white badge-status';
+                                statusBadge.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${data.percent}%`;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Erro monitor:', e);
+                }
+            }
+        }, 2000);
+    }
+
     // Treinar tabela específica
     async function trainTable(tableName) {
         console.log('Iniciando treinamento da tabela:', tableName);
         
-        if (!confirm(`Treinar a tabela ${tableName}?`)) {
+        if (!confirm(`Deseja iniciar o treinamento da tabela ${tableName}? O processo será executado em segundo plano.`)) {
             return;
         }
 
-        // Mostrar overlay de carregamento
-        const overlay = document.getElementById('loadingOverlay');
-        overlay.style.display = 'flex';
-        
         try {
-            showNotification('Treinamento iniciado...', 'info');
-            
-            const response = await fetch('{{ url_for("config_rohden_ai_bp.process_table") }}', {
+            const response = await fetch('/config_rohden_ai/process_table', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ 
@@ -880,37 +1386,36 @@
             });
             
             const result = await response.json();
-            console.log('Resultado do treinamento:', result);
             
             if (result.success) {
-                showNotification(`Tabela ${tableName} treinada com sucesso!`, 'success');
+                showNotification(`Treinamento de ${tableName} iniciado!`, 'success');
                 
-                // Marcar a tabela como treinada visualmente (Verde)
-                const cards = document.querySelectorAll('.table-card');
-                cards.forEach(card => {
-                    const nameElement = card.querySelector('.table-name');
-                    if (nameElement && nameElement.textContent.trim() === tableName) {
-                        card.classList.add('trained-row');
-                        const btn = card.querySelector('.btn-train');
-                        if (btn) {
-                            btn.innerHTML = '<i class="bi bi-check-circle me-1"></i>Treinada';
-                            btn.className = 'btn btn-sm btn-success disabled';
-                        }
+                // Registrar no monitor
+                trainingStatusMap[tableName] = { percent: 0, status: 'Iniciando...', done: false };
+                startGlobalTrainingMonitor();
+                
+                // Atualizar UI do card imediatamente (Untrained ou Trained)
+                const card = document.querySelector(`.table-card[data-table="${tableName}"]`);
+                if (card) {
+                    const btn = card.querySelector('.btn-train');
+                    const badge = card.querySelector('.badge-status');
+                    
+                    if (btn) {
+                        btn.className = 'btn btn-info btn-train disabled';
+                        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>0%';
                     }
-                });
-                
-                // Recarregar os dados para atualizar as duas abas
-                await loadTables();
-                await loadTablesForSchema();
+                    
+                    if (badge) {
+                        badge.className = 'badge bg-info text-white badge-status';
+                        badge.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>0%';
+                    }
+                }
             } else {
-                throw new Error(result.error || 'Erro desconhecido');
+                throw new Error(result.error || 'Erro ao iniciar treinamento');
             }
         } catch (error) {
             console.error('Erro ao treinar tabela:', error);
-            showNotification('Erro ao treinar tabela: ' + error.message, 'error');
-        } finally {
-            // Esconder overlay
-            overlay.style.display = 'none';
+            showNotification('Erro: ' + error.message, 'error');
         }
     }
 

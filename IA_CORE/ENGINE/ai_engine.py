@@ -8,9 +8,9 @@ from conecxaodb import get_connection
 from ..MEMORIA import memoria_system
 from .sql_builder import SQLBuilder
 from .vector_manager import VectorManager
+from .behavior_manager import BehaviorManager
 from ..DATA import storage
 from ..CONFIG.ai_temperature_config import AI_TEMPERATURE_SETTINGS, get_personality
-from ..CONFIG.prompt_manager import load_prompt
 from dotenv import load_dotenv
 
 # Carregar variáveis de ambiente do arquivo .env de forma robusta
@@ -21,7 +21,7 @@ else:
     load_dotenv() # Fallback para o CWD
 
 def load_local_config():
-    """Carrega a configuração do sistema robusto de dados (SQLite)"""
+    """Carrega a configuração do sistema robusto de dados (Oracle)"""
     try:
         tables_db = storage.load_tables()
         tables = []
@@ -46,7 +46,7 @@ def load_local_config():
         for fact in learned_db:
             learned.append({
                 'content': fact['content'],
-                'user': fact.get('tags', ''), # Usando tags para o usuário por enquanto
+                'user': fact.get('tags', ''),
                 'date': fact['created_at']
             })
             
@@ -57,13 +57,11 @@ def load_local_config():
             'learned': learned
         }
     except Exception as e:
-        print(f"Erro ao carregar configuração: {e}")
+        print(f"Erro ao carregar configuração do Oracle: {e}")
         return {'tables': [], 'metadata': {}, 'knowledge': {}, 'learned': []}
 
 def save_local_config(config):
-    """Salva a configuração no sistema robusto de dados (SQLite)"""
-    # Esta função agora é usada principalmente para salvar fatos aprendidos
-    # pois as tabelas são salvas via routes.py diretamente no storage
+    """Salva a configuração no sistema robusto de dados (Oracle)"""
     try:
         if 'learned' in config:
             for fact in config['learned']:
@@ -78,7 +76,7 @@ def save_local_config(config):
                         priority=1
                     )
     except Exception as e:
-        print(f"Erro ao salvar configuração: {e}")
+        print(f"Erro ao salvar configuração no Oracle: {e}")
 
 class LlamaEngine:
     _instance = None
@@ -91,12 +89,40 @@ class LlamaEngine:
     _decision_cache = {}   # Cache de decisão (CHAT/QUERY) por pergunta normalizada
     _training_cache = None
     _training_cache_time = 0
+    _prompt_cache = {}     # Cache de prompts do banco de dados
+
+    def _get_base_prompt(self, name: str, **kwargs) -> str:
+        """Busca o prompt no sistema de conhecimento (Etapa Final: Prompts Dinâmicos)"""
+        from ..DATA.storage import storage
+        
+        # 1. Tenta buscar do cache de classe para evitar excesso de IO
+        if name in self._prompt_cache:
+            content = self._prompt_cache[name]
+        else:
+            # 2. Busca do banco de dados
+            prompts = storage.get_knowledge(category='system_prompt')
+            content = next((p['content'] for p in prompts if p['title'] == name), "")
+            if content:
+                self._prompt_cache[name] = content
+        
+        if not content:
+            print(f"⚠️ Prompt não encontrado no banco: {name}")
+            return ""
+            
+        if kwargs:
+            try:
+                return content.format(**kwargs)
+            except KeyError as e:
+                print(f"⚠️ Variável de prompt faltando: {e} em {name}")
+                return content
+        return content
     
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(LlamaEngine, cls).__new__(cls)
             cls._instance.llm = None
             cls._instance.vector_manager = VectorManager()
+            cls._instance.behavior_manager = BehaviorManager()
             
             # Configuração do Motor Principal (Rohden AI Server)
             cls._instance.ai_url = os.getenv("ROHDEN_AI_URL")
@@ -110,6 +136,7 @@ class LlamaEngine:
                 'Content-Type': 'application/json',
                 'User-Agent': 'RohdenAI-Assistant/1.0'
             }
+            cls._instance._last_pattern_id = None
         return cls._instance
 
     def _load_cached_config(self):
@@ -310,34 +337,188 @@ class LlamaEngine:
 
     def _humanize_response(self, prompt: str, results: List[Dict[str, Any]], raw_text: str) -> str:
         """
-        Humaniza os dados brutos usando a IA como um juiz inteligente.
+        Humaniza os dados brutos usando Aprendizado por Imitação (Etapa 2).
         """
-        # Se não houver resultados, pedimos à IA para dar uma resposta humana de "não encontrado"
+        # ETAPA 2.2: Sistema de Decisão por Padrões
+        pattern_decision = ""
         if not results:
-            sys_prompt = load_prompt("humanizer_empty.txt")
-            user_prompt = f"Pergunta do usuário: '{prompt}'\nResultado: [Vazio]"
-            try:
-                return self._call_ai_with_limits(user_prompt, sys_prompt, num_predict=150, num_ctx=1024, temperature=0.5)
-            except:
-                return raw_text
+            pattern_decision = "⚠️ DECISÃO: Nenhum resultado encontrado. Informe amigavelmente que não localizou o registro."
+            sys_prompt_file = "humanizer_empty.txt"
+        elif len(results) > 5:
+            pattern_decision = "⚠️ DECISÃO: Muitos resultados encontrados (>5). Liste as opções de forma resumida e pergunte qual o usuário deseja refinar."
+            sys_prompt_file = "humanizer_judge.txt"
+        elif len(results) == 1:
+            pattern_decision = "✅ DECISÃO: Resultado único encontrado. Forneça a resposta direta e completa."
+            sys_prompt_file = "humanizer_judge.txt"
+        else:
+            pattern_decision = "✅ DECISÃO: Alguns resultados encontrados. Apresente-os de forma organizada."
+            sys_prompt_file = "humanizer_judge.txt"
 
-        # Preparação dos dados para a IA decidir (O Juiz)
-        data_json = json.dumps(results[:10], ensure_ascii=False, default=str)
-        pers_prompt, temp = get_personality("CHAT")
+        # ETAPA 2.1: IA Aprende por Imitação (Exemplos Similares)
+        behavior_context = self.behavior_manager.format_patterns_for_prompt(prompt)
         
-        sys_prompt = load_prompt("humanizer_judge.txt", pers_prompt=pers_prompt)
+        # Preparação do Prompt do Sistema
+        pers_prompt, temp = get_personality("CHAT")
+        sys_prompt_base = self._get_base_prompt(sys_prompt_file, pers_prompt=pers_prompt)
+        
+        # Combinamos tudo no contexto dinâmico
+        full_sys_prompt = f"{sys_prompt_base}\n\n{behavior_context}\n\n{pattern_decision}"
 
+        # Preparação dos dados para a IA
+        data_json = json.dumps(results[:10], ensure_ascii=False, default=str)
         user_prompt = (
             f"O que o usuário quer: '{prompt}'\n"
-            f"O que eu encontrei no banco: {data_json}\n\n"
-            "Analise os dados acima e responda de forma inteligente. Se houver dúvida, pergunte ao usuário."
+            f"O que eu encontrei no banco: {data_json if results else '[Vazio]'}\n\n"
+            "Responda seguindo o padrão dos exemplos de imitação acima."
         )
 
         try:
-            response = self._call_ai_with_limits(user_prompt, sys_prompt, num_predict=400, num_ctx=2048, temperature=temp)
+            response = self._call_ai_with_limits(user_prompt, full_sys_prompt, num_predict=400, num_ctx=2048, temperature=temp)
             return response.strip() if response else raw_text
-        except Exception:
+        except Exception as e:
+            print(f"❌ Erro na humanização por imitação: {e}")
             return raw_text
+
+    def _find_successful_patterns(self, prompt: str) -> List[Dict]:
+        """Busca conversas similares bem-sucedidas no banco de padrões."""
+        return self.behavior_manager.find_similar_patterns(prompt, limit=3)
+
+    def _get_pattern(self, category_key: str) -> Dict:
+        """
+        Retorna um padrão representativo para a situação atual.
+        Mapeia chaves simples para categorias do banco.
+        """
+        mapping = {
+            'multiple_results': 'Busca Ambígua',
+            'single_result': 'Busca Direta',
+            'no_results': 'Pergunta de Dados'
+        }
+        category = mapping.get(category_key, 'Busca Direta')
+        patterns = self.behavior_manager.get_patterns_by_category(category)
+        return patterns[0] if patterns else {}
+
+    def _apply_pattern(self, pattern: Dict, prompt: str, results: List[Dict]) -> str:
+        """
+        Usa a IA apenas para 'preencher o template' baseado no padrão selecionado.
+        """
+        # Se não houver padrão, usamos o humanizer padrão como fallback
+        if not pattern:
+            return self._humanize_response(prompt, results, "")
+
+        # Guardamos qual padrão foi usado para feedback posterior (Etapa 4)
+        self._last_pattern_id = pattern.get('id')
+
+        # Preparação do contexto de imitação
+        behavior_context = f"SITUAÇÃO EXEMPLO: {pattern.get('situation')}\n"
+        behavior_context += f"USUÁRIO: {pattern.get('user_input')}\n"
+        behavior_context += f"VOCÊ RESPONDEU: {pattern.get('ai_response')}\n"
+
+        # Dados reais encontrados
+        data_json = json.dumps(results[:10], ensure_ascii=False, default=str)
+        
+        # Prompt para a IA imitar o padrão
+        pers_prompt, temp = get_personality("CHAT")
+        sys_prompt = (
+            f"{pers_prompt}\n"
+            "Sua tarefa é responder ao usuário IMITANDO O ESTILO, TOM E FORMATO do exemplo abaixo.\n"
+            "Não invente informações. Use apenas os dados reais encontrados no banco.\n\n"
+            f"--- EXEMPLO PARA IMITAR ---\n{behavior_context}\n"
+        )
+        
+        user_prompt = (
+            f"O que o usuário perguntou agora: '{prompt}'\n"
+            f"O que foi encontrado no banco (Dados Reais): {data_json if results else '[Vazio]'}\n\n"
+            "Responda agora seguindo exatamente o modelo do exemplo acima:"
+        )
+
+        try:
+            response = self._call_ai_with_limits(user_prompt, sys_prompt, num_predict=400, temperature=temp)
+            return response.strip()
+        except Exception as e:
+            print(f"❌ Erro ao aplicar padrão: {e}")
+            return self._format_results({'fields': []}, results)
+
+    # --- ETAPA 4: SISTEMA DE FEEDBACK E EVOLUÇÃO ---
+    
+    def _analyze_feedback(self, next_user_message: str, history: List[Dict]) -> None:
+        """Detecta sucesso ou fracasso na mensagem do usuário e atualiza padrões (Etapa 4.1)."""
+        if not history or not hasattr(self, '_last_pattern_id') or not self._last_pattern_id:
+            return
+
+        msg_lower = next_user_message.lower()
+        
+        # Indicadores de Sucesso (Etapa 4.1)
+        success_indicators = ['obrigado', 'valeu', 'perfeito', 'é isso', 'consegui', 'boa', 'show', 'ok', 'entendi']
+        # Indicadores de Falha (Etapa 4.1)
+        failure_indicators = ['não', 'errado', 'mas eu queria', 'não é isso', 'ruim', 'corrigir', 'ajuda', 'falhou']
+
+        is_success = any(ind in msg_lower for ind in success_indicators)
+        is_failure = any(ind in msg_lower for ind in failure_indicators)
+
+        if is_success:
+            print(f"🌟 Feedback Positivo detectado para o padrão {self._last_pattern_id}")
+            self._update_pattern_score(self._last_pattern_id, 1)
+        elif is_failure:
+            print(f"⚠️ Feedback Negativo detectado para o padrão {self._last_pattern_id}")
+            self._update_pattern_score(self._last_pattern_id, -1)
+
+    def _update_pattern_score(self, pattern_id: int, delta: int) -> None:
+        """Atualiza a pontuação e prioridade de um padrão no Oracle (Etapa 4.2)."""
+        try:
+            from ..DATA.storage import DataStorage
+            st = DataStorage()
+            conn = st._get_conn()
+            if not conn: return
+            cursor = conn.cursor()
+            
+            if delta > 0:
+                sql = '''
+                    UPDATE SYSROH.TB_AI_BEHAVIORAL_PATTERNS 
+                    SET SUCCESS_COUNT = SUCCESS_COUNT + 1,
+                        PRIORITY_SCORE = PRIORITY_SCORE + 0.1
+                    WHERE ID = :pid
+                '''
+            else:
+                sql = '''
+                    UPDATE SYSROH.TB_AI_BEHAVIORAL_PATTERNS 
+                    SET FAILURE_COUNT = FAILURE_COUNT + 1,
+                        PRIORITY_SCORE = CASE WHEN PRIORITY_SCORE - 0.2 < 0.1 THEN 0.1 ELSE PRIORITY_SCORE - 0.2 END
+                    WHERE ID = :pid
+                '''
+            
+            cursor.execute(sql, {'pid': pattern_id})
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            print(f"Erro ao atualizar score do padrão: {e}")
+            # Limpa o ID para não processar feedback repetido
+            self._last_pattern_id = None
+        except Exception as e:
+            print(f"⚠️ Erro ao atualizar feedback do padrão: {e}")
+
+
+    def _decide_by_examples(self, prompt: str, results: List[Dict], username: str = None) -> str:
+        """
+        ETAPA 3.2: Função de Decisão por Exemplos.
+        Analisa os resultados e decide o comportamento baseado em imitação.
+        """
+        # 1. Buscar conversas similares bem-sucedidas
+        similar_conversations = self._find_successful_patterns(prompt)
+        
+        # 2. Analisar contexto atual
+        result_count = len(results) if isinstance(results, list) else 0
+        
+        # 3. Aplicar padrão mais similar
+        if result_count > 5:
+            pattern = self._get_pattern('multiple_results')
+        elif result_count == 1:
+            pattern = self._get_pattern('single_result')
+        else:
+            pattern = self._get_pattern('no_results')
+            
+        # 4. Usar IA apenas para "preencher o template"
+        return self._apply_pattern(pattern, prompt, results)
 
     def discover_relevant_tables(self, prompt, all_tables, top_n=3):
         """Usa busca vetorial para encontrar apenas as tabelas TREINADAS e relevantes"""
@@ -769,37 +950,32 @@ class LlamaEngine:
         except Exception:
             pass
 
-    def _get_optimized_system_prompt(self, relevant_tables: List[Dict], interpretacao: Dict) -> str:
-        """Constrói um system prompt cirúrgico, enviando apenas o necessário para a IA"""
+    def _get_optimized_system_prompt(self, relevant_tables: List[Dict], interpretacao: Dict, user_query: Optional[str] = None) -> str:
+        """Constrói um system prompt dinâmico, usando aprendizado por imitação."""
         
         # Base fixa, humana e inteligente
-        sys = "Você é o Rohden AI, o assistente inteligente oficial da Rohden. Seu tom de voz é amigável, leve, profissional e muito humano.\n"
-        sys += "PROIBIDO: Usar frases robóticas como 'decidi responder', 'com base na análise' ou 'analisando os dados'.\n"
-        sys += "PROIBIDO: Mencionar nomes técnicos de tabelas ou colunas (ex: TB_CONTATOS, ID_CONTATO) na resposta final. Use termos naturais (ex: 'contatos', 'código').\n"
-        sys += "Vá direto ao ponto: responda de forma natural, como se estivesse conversando com um colega de trabalho.\n"
-        sys += "Seja inteligente: varie suas respostas e use emojis de forma equilibrada para manter o tom leve.\n\n"
+        sys = "Você é o Rohden AI, o assistente inteligente oficial da Rohden. Seu tom de voz é amigável, profissional e muito humano.\n"
+        sys += "Vá direto ao ponto: responda de forma natural, sem jargões técnicos ou nomes de tabelas.\n"
+        
+        # ETAPA 2.1: IA Aprende por Imitação (Exemplos Similares)
+        behavior_examples = self.behavior_manager.format_patterns_for_prompt(user_query)
+        if behavior_examples:
+            sys += behavior_examples
         
         # Se não houver tabelas relevantes, o assistente apenas conversa
         if not relevant_tables:
-            return sys + "Responda de forma prestativa e humana. Você está em modo de conversa geral no momento."
+            return sys + "\nResponda de forma prestativa e humana. Você está em modo de conversa geral."
 
-        # Se houver tabelas, enviamos apenas os nomes e descrições primeiro
+        # Se houver tabelas, enviamos apenas o necessário
         sys += "\nCONHECIMENTO DISPONÍVEL (DADOS):\n"
         for t in relevant_tables:
-            sys += f"- {t['table_name']}: {t.get('table_description', 'Informações sobre ' + t['table_name'])}\n"
+            sys += f"- {t['table_name']}: {t.get('table_description', 'Dados de ' + t['table_name'])}\n"
         
-        # Sempre enviamos colunas se houver tabelas relevantes (para garantir que a IA saiba montar o SQL)
-        if relevant_tables:
-            sys += "\nCAMPOS QUE VOCÊ PODE CONSULTAR:\n"
-            for t in relevant_tables:
-                cols = [c['name'] for c in t.get('columns_info', [])[:15]] # Limite para foco
-                sys += f"- {t['table_name']}: {', '.join(cols)}\n"
+        # Schema e diretrizes mínimas
+        sys += "\nREGRAS DE DADOS:\n"
+        sys += "1. Use obrigatoriamente [SQL]comando[/SQL] para consultar o banco (Schema: SYSROH).\n"
+        sys += "2. Se não encontrar dados, informe de forma amigável.\n"
         
-        sys += "\nDIRETRIZES:\n"
-        sys += "1. Se a pergunta envolver busca de informações (quem é, qual o contato, quanto vendeu, etc), você DEVE obrigatoriamente usar [SQL]comando[/SQL] para consultar o banco.\n"
-        sys += "2. O schema é OBRIGATORIAMENTE 'SYSROH'. Todas as tabelas devem ser prefixadas (ex: SYSROH.TB_CONTATOS).\n"
-        sys += "3. Responda como um colega de trabalho prestativo, não como uma máquina.\n"
-        sys += "4. Se não encontrar o dado no SQL, informe que não localizou, mas não peça desculpas antes de tentar buscar."
         return sys
 
     def generate_response(self, prompt, username=None, history=None):
@@ -807,14 +983,12 @@ class LlamaEngine:
         Gera uma resposta baseada na arquitetura contextual:
         1. IA Principal classifica e decide (CHAT ou DATA_ANALYSIS)
         2. Execução da ação decidida pela IA
-        
-        REGRA DE OURO (ZERO HARDCODE): 
-        - É PROIBIDO o uso de strings de resposta hardcoded (fallbacks).
-        - Toda e qualquer resposta ao usuário deve vir da IA ou ser formatada com base em dados reais.
-        - Em caso de erro técnico, a IA deve ser consultada para explicar o erro ao usuário de forma humana.
         """
         import time
         start_time = time.time()
+        
+        # ETAPA 4.1: Analisar se esta nova mensagem é um feedback da resposta anterior
+        self._analyze_feedback(prompt, history)
         
         # 0. Contexto de Memória (Estado do Usuário)
         user_memory = ""
@@ -864,7 +1038,7 @@ class LlamaEngine:
             config_tables = storage.load_tables()
             
             # 2. ANÁLISE E DECISÃO PELA IA (Unificada)
-            # Passamos o prompt, tabelas, histórico e agora a memória do usuário
+            # ETAPA 3.1: O comportamento é guiado por análise e exemplos
             full_context_prompt = f"{user_memory}\n\nPergunta do Usuário: {prompt}" if user_memory else prompt
             ai_analysis = self._unified_ai_analysis(full_context_prompt, config_tables, history=processed_history, username=username)
             
@@ -895,9 +1069,9 @@ class LlamaEngine:
             
             # FLUXO: CHAT
             if action == 'CHAT':
-                # Se não temos texto da IA ainda, pedimos um agora (garante zero hardcode)
+                # ETAPA 3: Decisão de resposta por imitação (mesmo para chat sem dados)
                 if not chat_text:
-                    chat_text = self._call_ai(full_context_prompt, self._get_optimized_system_prompt([], {}))
+                    chat_text = self._decide_by_examples(prompt, [], username)
                 return {'text': chat_text, 'metadata': metadata}
             
             # FLUXO: DATA_ANALYSIS
@@ -908,7 +1082,7 @@ class LlamaEngine:
                 if not validated_plan:
                     # Se o plano falhou, pedimos à IA para explicar o erro técnico (plan_error) de forma humana
                     error_msg = f"Ocorreu um problema técnico ao tentar acessar os dados: {plan_error}. Por favor, explique isso ao usuário de forma amigável e peça mais detalhes se necessário."
-                    fallback_text = self._call_ai(error_msg, self._get_optimized_system_prompt([], {}))
+                    fallback_text = self._call_ai(error_msg, self._get_optimized_system_prompt([], {}, user_query=prompt))
                     return {'text': fallback_text, 'metadata': metadata}
 
                 # Execução SQL
@@ -924,7 +1098,7 @@ class LlamaEngine:
                         sql_query, params, dialect = SQLBuilder.from_plan(validated_plan).build()
                 except Exception as build_err:
                     error_msg = f"Erro ao montar SQL: {str(build_err)}. Explique isso ao usuário de forma humana."
-                    fallback_text = self._call_ai(error_msg, self._get_optimized_system_prompt([], {}))
+                    fallback_text = self._call_ai(error_msg, self._get_optimized_system_prompt([], {}, user_query=prompt))
                     return {'text': fallback_text, 'metadata': metadata}
 
                 # Persiste para treinamento futuro
@@ -937,7 +1111,7 @@ class LlamaEngine:
                 if not sql_result and action == 'DATA_ANALYSIS':
                     print(f"⚠️ Busca restritiva retornou 0 resultados. Tentando busca abrangente...")
                     retry_prompt = f"A busca por '{prompt}' não retornou nada. Sugira um novo plano SQL muito mais simples e abrangente (ex: apenas pelo primeiro nome ou apenas pelo sobrenome) para encontrarmos candidatos na tabela."
-                    target_table = next((t for t in tables if t.get('table_name').upper() == validated_plan.get('table').upper()), None)
+                    target_table = next((t for t in config_tables if t.get('table_name').upper() == validated_plan.get('table').upper()), None)
                     if target_table:
                         broader_plan = self._generate_data_plan(retry_prompt, target_table, history, username)
                         if broader_plan and broader_plan.get('plan'):
@@ -954,7 +1128,7 @@ class LlamaEngine:
                 if isinstance(sql_result, str):
                     # Se sql_result for string, provavelmente é uma mensagem de erro do banco
                     error_msg = f"O banco de dados retornou um erro: {sql_result}. Explique isso de forma humana."
-                    response = self._call_ai(error_msg, self._get_optimized_system_prompt([], {}))
+                    response = self._call_ai(error_msg, self._get_optimized_system_prompt([], {}, user_query=prompt))
                 else:
                     # NOVA LÓGICA: Verifica se há excesso de resultados antes de humanizar normalmente
                     try:
@@ -965,12 +1139,8 @@ class LlamaEngine:
                     except Exception as e:
                         print(f"⚠️ Erro ao processar refinamento de resultados: {e}")
 
-                    response = self._format_results(validated_plan, sql_result)
-                    # Humanização dos dados (Sempre via IA conforme regra de zero hardcode)
-                    try:
-                        response = self._humanize_response(prompt, sql_result, response)
-                    except Exception:
-                        pass # Mantém o response bruto apenas em falha crítica da IA
+                    # ETAPA 3: Decisão por Exemplos (Imitação de Comportamento)
+                    response = self._decide_by_examples(prompt, sql_result, username)
 
                 # Aprendizado Automático
                 if username and prompt:
@@ -979,7 +1149,7 @@ class LlamaEngine:
                 return {'text': response, 'metadata': metadata}
 
             # Última instância: se chegar aqui sem ação (raro), pede socorro à IA
-            final_fallback = self._call_ai(f"Não consegui processar a pergunta: '{prompt}'. Responda de forma amigável pedindo para eu reformular.", self._get_optimized_system_prompt([], {}))
+            final_fallback = self._call_ai(f"Não consegui processar a pergunta: '{prompt}'. Responda de forma amigável pedindo para eu reformular.", self._get_optimized_system_prompt([], {}, user_query=prompt))
             return {'text': final_fallback, 'metadata': metadata}
 
         except Exception as e:
@@ -1051,8 +1221,13 @@ class LlamaEngine:
                 history_context += f"[{role}]: {content[:200]}\n"
             history_context += "### FIM DO CONTEXTO ###\n"
 
-        # 4. PROMPT DE DECISÃO (Ultra-Agressivo para Dados)
-        decision_system_prompt = load_prompt("intent_decision.txt", topics_str=topics_str)
+        # 4. PROMPT DE DECISÃO (Simplificado com Exemplos)
+        decision_system_prompt = self._get_base_prompt("intent_decision.txt", topics_str=topics_str)
+        
+        # Injeção de Exemplos de Decisão (Busca Ambígua, Direta, etc)
+        decision_examples = self.behavior_manager.format_patterns_for_prompt()
+        if decision_examples:
+            decision_system_prompt += "\n### USE ESTES EXEMPLOS COMO GUIA DE DECISÃO:\n" + decision_examples
 
         try:
             # Chamada de Decisão (Mais robusta)
@@ -1146,7 +1321,7 @@ class LlamaEngine:
             for _, item in matches[:3]:
                 trained_examples += f"Pergunta: {item.get('q')}\nPlano: {json.dumps(item.get('plan'))}\n"
 
-        plan_system_prompt = load_prompt(
+        plan_system_prompt = self._get_base_prompt(
             "sql_plan_generation.txt",
             catalog=json.dumps(catalog, ensure_ascii=False),
             history_context=history_context,

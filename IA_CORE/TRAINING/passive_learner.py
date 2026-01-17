@@ -122,9 +122,13 @@ Se não houver nada relevante, retorne [].
 
         print(f"🧠 Aprendizado Passivo: {content}")
         
-        # Gerar vetor para o fato aprendido
+        # Gerar vetor para o fato aprendido (OBRIGATÓRIO)
         vector = self.vector_manager.generate_embedding(content)
-        vector_blob = self.vector_manager.vector_to_blob(vector) if vector else None
+        if not vector:
+            print(f"⚠️ Erro crítico: Falha ao vetorizar aprendizado passivo '{content}'. Abortando salvamento.")
+            return
+            
+        vector_blob = self.vector_manager.vector_to_blob(vector)
         
         self.storage.save_knowledge(
             category='passive_learning',

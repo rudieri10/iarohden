@@ -4,8 +4,8 @@ from conecxaodb import get_connection
 import traceback
 import os
 import json
-import sqlite3
 from datetime import datetime
+import threading
 
 # Importar o storage da IA Core
 try:
@@ -26,6 +26,25 @@ except ImportError:
 
 # Exportação para o IP do servidor (UNC Path)
 AI_DATA_EXPORT_DIR = r'\\192.168.1.217\c$\IA\dados ia' 
+
+# Armazenamento global temporário para progresso de treinamento
+training_progress = {}
+
+@config_rohden_ai_bp.route('/training_status')
+def get_all_training_status():
+    """Retorna o status de todos os treinamentos ativos"""
+    return jsonify(training_progress)
+
+@config_rohden_ai_bp.route('/training_progress/<table_name>')
+def get_training_progress(table_name):
+    """Retorna o progresso atual do treinamento para uma tabela"""
+    progress = training_progress.get(table_name, {
+        'percent': 0, 
+        'status': 'Pendente', 
+        'remaining': 0,
+        'done': False
+    })
+    return jsonify(progress)
 
 def ensure_export_dir():
     """Garante que a pasta de exportação exista"""
@@ -93,7 +112,7 @@ def save_config():
     data = request.json
     tables = data.get('tables', [])
     
-    # Sincronizar com o Cérebro da IA (rohden_ai.db)
+    # Sincronizar com o Banco de Dados Oracle (SYSROH)
     try:
         db_tables = []
         for t in tables:
@@ -132,26 +151,46 @@ def process_table():
     if not table_name:
         return jsonify({'error': 'Nome da tabela não fornecido'}), 400
 
-    # Se schema_name for vazio por algum motivo, garantir que tenha um valor padrão
     if not schema_name:
         schema_name = 'SYSROH'
-        
-    conn = get_connection()
-    if not conn:
-        return jsonify({'error': 'Erro de conexão'}), 500
-        
+
+    # Iniciar treinamento em segundo plano
+    thread = threading.Thread(target=run_background_training, args=(table_name, schema_name))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        'success': True,
+        'message': f"Treinamento da tabela {table_name} iniciado em segundo plano."
+    })
+
+def run_background_training(table_name, schema_name):
+    """Executa o treinamento em uma thread separada para não bloquear o servidor"""
+    def update_progress(percent, msg, remaining=0):
+        training_progress[table_name] = {
+            'percent': percent,
+            'status': msg,
+            'remaining': remaining,
+            'done': False
+        }
+
     try:
+        update_progress(0, "Conectando ao Oracle...")
+        conn = get_connection()
+        if not conn:
+            update_progress(0, "Erro: Falha na conexão com o banco")
+            return
+            
         cursor = conn.cursor()
         
-        # 0. Buscar contagem total de registros - Adicionando aspas e garantindo que não sejam vazias
-        # ORA-01741 ocorre se tentarmos fazer ""."" (aspas vazias)
+        # 0. Buscar contagem total
         full_table_name = f'"{schema_name}"."{table_name}"'
+        update_progress(5, f"Contando registros em {table_name}...")
         cursor.execute(f'SELECT COUNT(*) FROM {full_table_name}')
         total_records = cursor.fetchone()[0]
         
-        # 1. Buscar metadados das colunas, comentários e Constraints (PK/FK)
-        # Usar literais sem aspas para o WHERE, pois o Oracle armazena em uppercase
-        # Corrigido nomes de bind variables para evitar conflitos (ex: :owner_name em vez de :schema)
+        # 1. Buscar metadados
+        update_progress(10, "Lendo estrutura da tabela...")
         cursor.execute(f"""
             SELECT 
                 cols.column_name, 
@@ -170,6 +209,7 @@ def process_table():
             WHERE cols.owner = :owner_name AND cols.table_name = :tbl_name
             ORDER BY cols.column_id
         """, {'owner_name': schema_name.upper(), 'tbl_name': table_name.upper()})
+        
         columns_info = []
         for row in cursor.fetchall():
             columns_info.append({
@@ -180,44 +220,16 @@ def process_table():
                 'is_pk': row[4] == 'Y'
             })
             
-        # 1.1 Buscar Foreign Keys (Relacionamentos)
-        fks_info = []
-        try:
-            cursor.execute(f"""
-                SELECT 
-                    cols.column_name, 
-                    r_cols.table_name as ref_table, 
-                    r_cols.column_name as ref_column
-                FROM all_cons_columns cols
-                JOIN all_constraints cons ON cols.constraint_name = cons.constraint_name
-                JOIN all_cons_columns r_cols ON cons.r_constraint_name = r_cols.constraint_name
-                WHERE cons.constraint_type = 'R' 
-                  AND cons.owner = :owner_name
-                  AND cons.table_name = :tbl_name
-            """, {'owner_name': schema_name.upper(), 'tbl_name': table_name.upper()})
-            for row in cursor.fetchall():
-                fks_info.append({
-                    'column': row[0],
-                    'ref_table': row[1],
-                    'ref_column': row[2]
-                })
-        except Exception:
-            pass
-
-        # 2. Amostragem Adaptativa e Estratificada
-        # Se a tabela for pequena (< 10k), pegamos tudo.
-        # Se for grande, pegamos uma amostra de até 10% (máx 25k) distribuída aleatoriamente pelo Oracle (SAMPLE)
+        # 2. Amostragem
+        update_progress(15, f"Extraindo amostra adaptativa ({total_records} registros)... ")
         if total_records <= 10000:
             sample_query = f'SELECT * FROM {full_table_name}'
             target_sample = total_records
         else:
-            # Calcular porcentagem para o SAMPLE (ex: se quero 25k de 1M, a porcentagem é 2.5%)
             target_sample = min(int(total_records * 0.1), 25000)
             sample_percent = max(round((target_sample / total_records) * 100, 2), 0.01)
-            # SAMPLE(n) no Oracle pega uma amostra estatística de n% dos blocos/linhas
             sample_query = f'SELECT * FROM (SELECT * FROM {full_table_name} SAMPLE({sample_percent})) WHERE ROWNUM <= {target_sample}'
         
-        print(f"Buscando amostra adaptativa de {target_sample} registros para {table_name} (Total: {total_records})...")
         cursor.execute(sample_query)
         cols = [col[0] for col in cursor.description]
         sample_rows = []
@@ -230,123 +242,34 @@ def process_table():
                     row_dict[cols[i]] = val
             sample_rows.append(row_dict)
             
-        # 3. Treinamento Inteligente Sem IA (Usando o novo Trainer)
-        try:
-            training_result = trainer.train_table(table_name, columns_info, sample_rows, total_records)
-            advanced_description = training_result.get('summary', f"Tabela {table_name} treinada.")
-            vector_success = training_result.get('vector_success', False)
-            
-            # 3.1 Acionar descoberta de processos automaticamente
-            try:
-                trainer.train_processes()
-            except Exception as proc_err:
-                print(f"Aviso: Erro ao atualizar fluxos de processos: {str(proc_err)}")
-        except Exception as train_err:
-            return jsonify({'error': f"Erro no motor de treinamento: {str(train_err)}"}), 500
+        # 3. Treinamento
+        update_progress(20, "Iniciando motor de análise profunda...")
+        training_result = trainer.train_table(table_name, columns_info, sample_rows, total_records, progress_callback=update_progress)
+        vector_success = training_result.get('vector_success', False)
         
-        # 4. Exportar tabela toda para banco de dados SQLite em \\192.168.1.217\c$\IA\dados ia
-        export_msg = ""
+        # 4. Sincronização final
+        update_progress(95, "Sincronizando dados com o servidor de IA...")
         export_success = True
-        try:
-            ensure_export_dir()
-            
-            # Se for uma tabela muito grande (ex: TB_CONTATOS), vamos avisar no log
-            if total_records > 100000:
-                print(f"Exportando tabela grande ({total_records} registros): {table_name}...")
-
-            # Definir caminho do arquivo .db
-            export_file_path = os.path.join(AI_DATA_EXPORT_DIR, f"{table_name}.db")
-            
-            # Remover arquivo antigo se existir para garantir integridade
-            if os.path.exists(export_file_path):
-                try:
-                    os.remove(export_file_path)
-                except Exception as e:
-                    print(f"Erro ao remover arquivo antigo {export_file_path}: {str(e)}")
-                    # Se não conseguir remover, tentamos sobrescrever ou falhamos graciosamente
-
-            # Conectar ao SQLite
-            sqlite_conn = sqlite3.connect(export_file_path)
-            sqlite_cursor = sqlite_conn.cursor()
-
-            # Mapear tipos do Oracle para SQLite
-            def map_type(oracle_type):
-                oracle_type = oracle_type.upper()
-                if 'NUMBER' in oracle_type: return 'REAL'
-                if 'CHAR' in oracle_type or 'VARCHAR' in oracle_type: return 'TEXT'
-                if 'DATE' in oracle_type or 'TIMESTAMP' in oracle_type: return 'TEXT'
-                return 'TEXT'
-
-            # Criar tabela no SQLite
-            cols_def = []
-            for col in columns_info:
-                col_name = col['name']
-                col_type = map_type(col['type'])
-                pk_def = " PRIMARY KEY" if col['is_pk'] else ""
-                cols_def.append(f'"{col_name}" {col_type}{pk_def}')
-            
-            create_sql = f'CREATE TABLE "{table_name}" ({", ".join(cols_def)})'
-            sqlite_cursor.execute(create_sql)
-
-            # Buscar todos os dados do Oracle - Adicionando aspas
-            cursor.execute(f'SELECT * FROM {full_table_name}')
-            all_cols = [col[0] for col in cursor.description]
-            
-            placeholders = ", ".join(["?" for _ in all_cols])
-            insert_sql = f'INSERT INTO "{table_name}" VALUES ({placeholders})'
-            
-            count = 0
-            # Usar fetchmany e transação para alta performance
-            while True:
-                rows = cursor.fetchmany(1000)
-                if not rows:
-                    break
-                
-                # Tratar valores para o SQLite
-                processed_rows = []
-                for row in rows:
-                    processed_row = []
-                    for val in row:
-                        if val is None:
-                            processed_row.append(None)
-                        elif hasattr(val, 'isoformat'):
-                            processed_row.append(val.isoformat())
-                        else:
-                            processed_row.append(val)
-                    processed_rows.append(tuple(processed_row))
-                
-                sqlite_cursor.executemany(insert_sql, processed_rows)
-                count += len(processed_rows)
-            
-            sqlite_conn.commit()
-            sqlite_conn.close()
-            
-            export_msg = f" Exportado banco SQLite com {count} registros para o servidor de IA."
-        except Exception as export_error:
-            export_success = False
-            export_msg = f" (Erro na exportação SQLite: {str(export_error)})"
-            print(f"Erro na exportação da tabela {table_name}: {str(export_error)}")
         
-        # 5. Atualizar o status de exportação no banco de dados da IA
-        try:
-            current_meta = storage.get_table_metadata(table_name)
-            if current_meta:
-                current_meta['export_status'] = "Sucesso" if export_success else f"Erro: {export_msg}"
-                storage.save_tables([current_meta])
-        except Exception as update_err:
-            print(f"Erro ao atualizar status de exportação: {str(update_err)}")
+        # Finalizar
+        update_progress(100, "Concluído!", 0)
+        training_progress[table_name]['done'] = True
+        
+        # Atualizar metadados
+        current_meta = storage.get_table_metadata(table_name)
+        if current_meta:
+            current_meta['export_status'] = "Sucesso" if export_success else "Erro na exportação"
+            storage.save_tables([current_meta])
+            
+        # Atualizar fluxos
+        trainer.train_processes()
 
-        return jsonify({
-            'success': True, 
-            'vector_success': vector_success,
-            'export_success': export_success,
-            'message': f"Treinamento PROFUNDO concluído com sucesso para a tabela {table_name}.{export_msg}"
-        })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        update_progress(0, f"Erro: {str(e)}")
+        print(f"Erro treinamento thread: {traceback.format_exc()}")
     finally:
-        cursor.close()
-        conn.close()
+        if 'cursor' in locals(): cursor.close()
+        if 'conn' in locals(): conn.close()
 
 @config_rohden_ai_bp.route('/get_current_config')
 def get_current_config():
@@ -354,7 +277,7 @@ def get_current_config():
     tables_list = []
     metadata_map = {}
     
-    # Carregar do Cérebro da IA (rohden_ai.db)
+    # Carregar do Banco de Dados Oracle (SYSROH)
     try:
         tables_db = storage.load_tables()
         for t_db in tables_db:
@@ -396,6 +319,50 @@ def get_process_flows():
     """Retorna os fluxos de processos descobertos"""
     try:
         flows = storage.get_process_flows()
+        # Limpar bytes não serializáveis
+        for f in flows:
+            if 'embedding_vector' in f:
+                del f['embedding_vector']
         return jsonify({'flows': flows})
     except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def clean_for_json(obj):
+    """Converte recursivamente objetos não serializáveis (como bytes) em formatos compatíveis"""
+    if isinstance(obj, dict):
+        return {k: clean_for_json(v) for k, v in obj.items() if k != 'embedding_vector'}
+    elif isinstance(obj, list):
+        return [clean_for_json(i) for i in obj]
+    elif isinstance(obj, bytes):
+        return "<binary data>"
+    return obj
+
+@config_rohden_ai_bp.route('/get_ai_data')
+def get_ai_data():
+    """Retorna um compilado de todo o conhecimento da IA para o frontend"""
+    try:
+        # 1. Carregar dados do storage
+        tables = storage.load_tables()
+        patterns = storage.get_behavioral_patterns()
+        flows = storage.get_process_flows()
+        knowledge = storage.get_knowledge()
+        
+        # 2. Limpar dados para JSON
+        data = {
+            'tables': clean_for_json(tables),
+            'patterns': clean_for_json(patterns),
+            'flows': clean_for_json(flows),
+            'knowledge': clean_for_json(knowledge),
+            'stats': {
+                'total_tables': len(tables),
+                'total_patterns': len(patterns),
+                'total_flows': len(flows)
+            }
+        }
+        
+        return jsonify(data)
+    except Exception as e:
+        print(f"Erro ao buscar dados da IA: {str(e)}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
