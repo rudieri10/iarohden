@@ -35,48 +35,17 @@ class BehaviorManager:
         self.storage.save_behavioral_pattern(pattern)
         return True
         
-    def get_patterns_by_category(self, category: str) -> List[Dict]:
-        """Recupera exemplos de uma categoria específica para alimentar a IA"""
-        return self.storage.get_behavioral_patterns(category=category)
+    def get_patterns_by_category(self, category: str, limit: int = 5) -> List[Dict]:
+        """Recupera exemplos de uma categoria específica para alimentar a IA (Otimizado para Oracle)"""
+        return self.storage.get_behavioral_patterns(category=category, limit=limit)
         
-    def get_all_patterns(self) -> List[Dict]:
-        """Recupera todos os padrões registrados"""
-        return self.storage.get_behavioral_patterns()
+    def get_all_patterns(self, limit: int = 50) -> List[Dict]:
+        """Recupera os padrões mais recentes (Otimizado para Oracle)"""
+        return self.storage.get_behavioral_patterns(limit=limit)
 
     def find_similar_patterns(self, user_input: str, limit: int = 3) -> List[Dict]:
-        """Busca padrões similares ao input do usuário e prioriza os de sucesso (Etapa 4.2)"""
-        all_patterns = self.get_all_patterns()
-        if not all_patterns:
-            return []
-            
-        # Sistema de pontuação por palavras em comum + prioridade de feedback
-        input_words = set(user_input.lower().split())
-        scored_patterns = []
-        
-        for p in all_patterns:
-            pattern_words = set(p['user_input'].lower().split())
-            common_words = input_words.intersection(pattern_words)
-            
-            # Score Base: Palavras em comum
-            score = len(common_words)
-            
-            # Score de Feedback: Padrões que funcionam ganham bônus
-            priority = p.get('priority_score', 1.0)
-            
-            # Score Final: Combinação de similaridade e performance
-            final_score = score * priority
-            
-            # Bônus para categorias específicas se palavras-chave de intenção estiverem presentes
-            if 'quem' in input_words or 'qual' in input_words:
-                if p['category'] in ['Busca Direta', 'Busca Ambígua']:
-                    final_score += 0.5
-            
-            if final_score > 0:
-                scored_patterns.append((final_score, p))
-                
-        # Ordenar por score final e retornar os top N
-        scored_patterns.sort(key=lambda x: x[0], reverse=True)
-        return [p for score, p in scored_patterns[:limit]]
+        """Busca padrões similares usando a nova busca vetorial do ChromaDB (Ultra Rápido)"""
+        return self.storage.find_similar_patterns(user_input, limit=limit)
 
     def format_patterns_for_prompt(self, user_input: Optional[str] = None) -> str:
         """Formata os padrões em uma string legível. Se user_input for fornecido, busca similares."""

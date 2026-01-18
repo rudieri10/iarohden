@@ -536,7 +536,10 @@
         // Listener para aba de Dados da IA
         const dataTab = document.getElementById('data-tab');
         if (dataTab) {
-            dataTab.addEventListener('click', loadAIData);
+            dataTab.addEventListener('click', function() {
+                cachedAIData = null; // Forçar recarregamento limpando cache local
+                loadAIData();
+            });
         }
     });
 
@@ -572,7 +575,14 @@
         `;
 
         try {
-            const response = await fetch('/config_rohden_ai/get_ai_data');
+            // Adicionar timestamp para evitar cache do navegador
+            const response = await fetch(`/config_rohden_ai/get_ai_data?t=${new Date().getTime()}`);
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Erro HTTP ${response.status}: ${errorText.substring(0, 100)}`);
+            }
+
             const data = await response.json();
             
             if (data.error) throw new Error(data.error);
@@ -1174,7 +1184,7 @@
         // Por enquanto vamos usar o que temos no trainedTables e tentar carregar metadados completos
         
         try {
-            const response = await fetch('{{ url_for("config_rohden_ai_bp.get_current_config") }}');
+            const response = await fetch('{{ url_for("config_rohden_ai_bp.get_current_config") }}?t=' + new Date().getTime());
             const data = await response.json();
             const meta = data.metadata[tableName];
 
@@ -1440,7 +1450,7 @@
     async function loadTables() {
         console.log('Buscando tabelas treinadas da API...');
         try {
-            const response = await fetch('{{ url_for("config_rohden_ai_bp.get_current_config") }}');
+            const response = await fetch('{{ url_for("config_rohden_ai_bp.get_current_config") }}?t=' + new Date().getTime());
             const data = await response.json();
             
             console.log('Tabelas treinadas carregadas da API:', data);

@@ -44,30 +44,52 @@ class VectorManager:
             from urllib.parse import urlparse
             parsed = urlparse(base_url)
             
-            # Se o caminho contém /api/generate, o prefixo é o que vem antes de /api
+            # Tentar derivar o host_url removendo o endpoint de chat se estiver presente
+            # Se a URL for http://host:port/api/generate, queremos http://host:port
             path_prefix = parsed.path.split('/api/')[0].rstrip('/')
             host_url = f"{parsed.scheme}://{parsed.netloc}{path_prefix}"
             
+            # Se a URL original já contém /api/ e não foi capturada pelo split acima, 
+            # vamos tentar uma substituição direta para ser mais resiliente
+            direct_api_url = base_url.replace('/generate', '/embeddings').replace('/chat', '/embeddings')
+            direct_embed_url = base_url.replace('/generate', '/embed').replace('/chat', '/embed')
+            
             # Lista de possíveis endpoints de embedding (Ollama novo, Ollama antigo, OpenAI-style)
-            endpoints = [
+            endpoints = []
+            
+            # Prioridade 1: Derivação direta da URL que já sabemos que (teoricamente) funciona para chat
+            if '/api/' in base_url:
+                endpoints.append(direct_embed_url)
+                endpoints.append(direct_api_url)
+            
+            # Prioridade 2: Endpoints padrão baseados no host
+            endpoints.extend([
                 f"{host_url}/api/embed",       # Ollama moderno
                 f"{host_url}/api/embeddings",  # Ollama antigo
                 f"{host_url}/v1/embeddings",   # OpenAI/Llama.cpp
+                f"{host_url}/embed",           # Custom
                 f"{host_url}/embeddings"       # Custom
-            ]
+            ])
+            
+            # Remover duplicatas mantendo a ordem
+            endpoints = list(dict.fromkeys(endpoints))
             
             for emb_url in endpoints:
                 # Tenta até 3 vezes por endpoint com backoff exponencial simples
                 for attempt in range(3):
                     try:
+                        # LOG de tentativa
+                        if attempt == 0:
+                            print(f"   -> Testando endpoint: {emb_url}")
+
                         # Formato Ollama Moderno (/api/embed)
-                        if '/api/embed' in emb_url:
+                        if '/api/embed' in emb_url or emb_url.endswith('/embed'):
                             payload = {
                                 "model": os.getenv("ROHDEN_AI_MODEL", "llama3.1-gguf"),
                                 "input": clean_text
                             }
                         # Formato Ollama Antigo (/api/embeddings)
-                        elif '/api/embeddings' in emb_url:
+                        elif '/api/embeddings' in emb_url or emb_url.endswith('/embeddings'):
                             payload = {
                                 "model": os.getenv("ROHDEN_AI_MODEL", "llama3.1-gguf"),
                                 "prompt": clean_text
@@ -84,10 +106,11 @@ class VectorManager:
                         
                         if response.status_code == 200:
                             data = response.json()
-                            # Extração flexível (pode vir como 'embedding' ou 'data[0].embedding')
-                            embedding = data.get("embedding")
+                            # Extração flexível (pode vir como 'embedding', 'embeddings' ou 'data[0].embedding')
+                            embedding = data.get("embedding") or data.get("embeddings")
+                            
                             if not embedding and "data" in data and isinstance(data["data"], list):
-                                embedding = data["data"][0].get("embedding")
+                                embedding = data["data"][0].get("embedding") or data["data"][0].get("embeddings")
                             
                             # Caso específico do /api/embed do Ollama que pode retornar uma lista de listas
                             if embedding and isinstance(embedding, list) and len(embedding) > 0:

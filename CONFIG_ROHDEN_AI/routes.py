@@ -329,37 +329,87 @@ def get_process_flows():
         return jsonify({'error': str(e)}), 500
 
 def clean_for_json(obj):
-    """Converte recursivamente objetos não serializáveis (como bytes) em formatos compatíveis"""
+    """Converte recursivamente objetos não serializáveis em formatos compatíveis.
+    Otimizado para ignorar campos binários pesados (como embedding_vector)."""
+    if obj is None:
+        return None
+        
+    # Se for um LOB do Oracle que ainda não foi lido
+    if hasattr(obj, 'read'):
+        try:
+            return obj.read()
+        except:
+            return "<unread lob>"
+
     if isinstance(obj, dict):
-        return {k: clean_for_json(v) for k, v in obj.items() if k != 'embedding_vector'}
+        # OTIMIZAÇÃO: Remove vetores de embedding que são pesados e não usados no frontend
+        return {
+            k: clean_for_json(v) 
+            for k, v in obj.items() 
+            if k.lower() not in ('embedding_vector', 'vector')
+        }
     elif isinstance(obj, list):
         return [clean_for_json(i) for i in obj]
     elif isinstance(obj, bytes):
-        return "<binary data>"
-    return obj
+        # Se for bytes, só tenta decodificar se for pequeno (provavelmente texto)
+        if len(obj) < 1000:
+            try:
+                return obj.decode('utf-8')
+            except:
+                return f"<binary data {len(obj)} bytes>"
+        return f"<binary data {len(obj)} bytes>"
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, (int, float, str, bool)):
+        return obj
+    return str(obj)
 
 @config_rohden_ai_bp.route('/get_ai_data')
 def get_ai_data():
     """Retorna um compilado de todo o conhecimento da IA para o frontend"""
+    import time
+    start_time = time.time()
     try:
-        # 1. Carregar dados do storage
-        tables = storage.load_tables()
-        patterns = storage.get_behavioral_patterns()
-        flows = storage.get_process_flows()
-        knowledge = storage.get_knowledge()
+        # 1. Carregar dados do storage (com limites NO BANCO para performance)
+        t0 = time.time()
+        tables = storage.load_tables(limit=50)
+        
+        t1 = time.time()
+        # Limitar padrões aos 50 mais recentes diretamente no SQL
+        patterns = storage.get_behavioral_patterns(limit=50)
+        
+        # Pega a contagem total de forma leve
+        total_patterns_count = storage.get_patterns_count()
+        
+        t2 = time.time()
+        flows = storage.get_process_flows(limit=50)
+        
+        t3 = time.time()
+        knowledge = storage.get_knowledge(limit=50)
+        
+        t4 = time.time()
         
         # 2. Limpar dados para JSON
-        data = {
+        print(f"DEBUG: Iniciando clean_for_json (Tables: {len(tables)}, Patterns: {len(patterns)})")
+        clean_data = {
             'tables': clean_for_json(tables),
             'patterns': clean_for_json(patterns),
             'flows': clean_for_json(flows),
-            'knowledge': clean_for_json(knowledge),
+            'knowledge': clean_for_json(knowledge)
+        }
+        t5 = time.time()
+        
+        data = {
+            **clean_data,
             'stats': {
                 'total_tables': len(tables),
-                'total_patterns': len(patterns),
+                'total_patterns': total_patterns_count,
                 'total_flows': len(flows)
             }
         }
+        
+        print(f"DEBUG: get_ai_data timings: tables={t1-t0:.2f}s, patterns_load={t2-t1:.2f}s, flows={t3-t2:.2f}s, knowledge={t4-t3:.2f}s, clean={t5-t4:.2f}s")
+        print(f"DEBUG: get_ai_data total time: {time.time() - start_time:.2f}s")
         
         return jsonify(data)
     except Exception as e:

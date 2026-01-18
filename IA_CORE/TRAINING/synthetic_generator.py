@@ -1,176 +1,185 @@
-
 import random
 import json
+import re
 from typing import List, Dict, Any
 from ..ENGINE.vector_manager import VectorManager
 
 class SyntheticPatternGenerator:
     """
-    Gerador Massivo de Padrões Sintéticos.
-    Cria milhares de comportamentos baseados na estrutura real das tabelas.
+    Gerador 100% Autônomo de Padrões de Treinamento via IA Local (Samuca).
+    A IA analisa a estrutura, entende o propósito e gera perguntas naturais sem intervenção humana.
     """
     
     def __init__(self, storage):
         self.storage = storage
         self.vector_manager = VectorManager()
 
-    def generate_for_table(self, table_name: str, profile: Dict[str, Any], columns: List[Dict], sample_data: List[Dict], limit_per_type: int = 5000, progress_callback=None):
+    def generate_with_ai(self, table_name: str, columns: List[Dict], sample_data: List[Dict], profile: Dict = None, total_records: int = 0, progress_callback=None):
         """
-        Gera e salva padrões para uma tabela específica.
-        Aumentado para suportar geração massiva de comportamentos com vetorização.
+        Geração Principal Autônoma.
         """
-        print(f"--- Gerando Padrões Sintéticos (Novo Modelo de Aprendizado) para {table_name} ---")
-        patterns = []
+        from ..ENGINE.ai_engine import LlamaEngine
+        engine = LlamaEngine()
         
-        # 1. Extrair valores reais da amostra para tornar as perguntas realistas
-        col_values = {}
-        for col in columns:
-            name = col['name']
-            values = list(set([str(row.get(name)) for row in sample_data if row.get(name)]))
-            if values:
-                col_values[name] = values
+        print(f"--- Iniciando Geração 100% Autônoma para {table_name} ---")
+        if progress_callback:
+            progress_callback(0, 100, f"Samuca analisando {table_name}...", 0)
 
-        # Estimar total de padrões para a barra de progresso
-        total_to_generate = 0
-        for values in col_values.values():
-            total_to_generate += len(values[:limit_per_type])
+        # Preparar contexto técnico puro (sem dicas manuais)
+        schema_summary = []
+        for c in columns:
+            col_name = c['name']
+            col_info = f"- {col_name} ({c.get('type', 'TEXT')})"
+            schema_summary.append(col_info)
         
-        if 'EMAIL' in col_values:
-            total_to_generate += min(len(col_values['EMAIL']) * 2, limit_per_type)
+        schema_text = "\n".join(schema_summary)
+        samples = sample_data[:60] # Amostra generosa para a IA entender o contexto
         
-        total_to_generate += 5 # Count templates
-        
-        current_count = 0
-        import time
-        start_time = time.time()
+        # PROMPT 100% AUTÔNOMO: A IA deve descobrir o que a tabela faz.
+        system_prompt = """Você é um Analista de Dados Sênior da Rohden.
+Sua tarefa é analisar a estrutura e os dados de uma tabela e gerar padrões de treinamento para uma IA de atendimento.
 
-        def update_progress(msg):
-            nonlocal current_count
-            current_count += 1
-            if progress_callback and current_count % 10 == 0:
-                elapsed = time.time() - start_time
-                avg_time = elapsed / current_count if current_count > 0 else 0
-                remaining = (total_to_generate - current_count) * avg_time
-                progress_callback(current_count, total_to_generate, msg, remaining)
+REGRAS CRÍTICAS DE NEGÓCIO:
+1. ANALISE PRIMEIRO: Olhe para as colunas e os dados da amostra. Entenda o propósito real desta tabela (ex: é uma tabela de preços? de estoque? de contatos? de log?). Não assuma nada antes de olhar os dados.
+2. PERGUNTAS NATURAIS: Gere perguntas que um usuário real faria (ex: "Quem é...", "Qual o contato de...", "Quais os pedidos de...").
+3. PROIBIDO IDs: NUNCA use IDs numéricos (ex: 5215, 102, 001) nas perguntas. Um usuário nunca pergunta por ID. Converta IDs em nomes reais presentes nos dados.
+4. FOCO EM DADOS TEXTUAIS: Busque por nomes, descrições, e-mails, endereços e informações que humanos entendem.
+5. RESPOSTA RICA: A 'ai_response' deve ser completa e informativa, usando os dados da amostra.
+6. ZERO HEURÍSTICA: Não use padrões pré-definidos. Deixe a IA decidir o que é importante.
+"""
 
-        # 2. Gerar Padrões de Busca Simples (LIKE)
-        for col_name, values in col_values.items():
-            if len(patterns) >= 50000: break
+        try:
+            # Geração em lotes para garantir qualidade e evitar timeouts do Ollama
+            all_patterns = self._generate_autonomous_batches(table_name, columns, samples, engine)
             
-            for val in values[:limit_per_type]:
-                templates = [
-                    f"quem é {val}",
-                    f"buscar {col_name} {val}",
-                    f"onde está {val}",
-                    f"qual o {col_name} de {val}",
-                    f"me mostre os dados de {val}",
-                    f"encontre {val} na {table_name}",
-                    f"procure por {val}",
-                    f"detalhes de {val}",
-                    f"localizar {val}",
-                    f"quem seria {val}?",
-                    f"dados cadastrais de {val}"
-                ]
-                
-                query_plan = {
-                    "action": "DATA_ANALYSIS",
-                    "plan": {
-                        "type": "SELECT",
-                        "table": table_name,
-                        "fields": [c['name'] for c in columns[:10]],
-                        "filters": [{"field": col_name, "op": "LIKE", "value": f"%{val}%", "case_insensitive": True}]
-                    }
-                }
-                
-                user_input = random.choice(templates)
-                update_progress(f"Vetorizando: {user_input[:30]}...")
-                
-                # VETORIZAÇÃO OBRIGATÓRIA (Sem Fallback conforme pedido)
-                vector = self.vector_manager.generate_embedding(user_input)
-                if not vector:
-                    continue
-                    
-                patterns.append({
-                    "situation": f"Busca direta por {col_name}",
-                    "user_input": user_input,
-                    "ai_action": "DATA_ANALYSIS",
-                    "ai_response": json.dumps(query_plan),
-                    "category": "Busca Direta",
-                    "tags": f"{table_name}, {col_name}, sintético",
-                    "embedding_vector": self.vector_manager.vector_to_blob(vector)
-                })
+            if not all_patterns:
+                print(f"⚠️ Samuca não conseguiu gerar padrões autônomos para {table_name}.")
+                return 0
 
-        # 3. Gerar Padrões de Busca com Exclusão (NOT LIKE)
-        if 'EMAIL' in col_values:
-            email_values = col_values['EMAIL']
-            other_cols = [c for c in col_values.keys() if c != 'EMAIL']
+            print(f"🧠 Samuca gerou {len(all_patterns)} padrões autônomos de alta qualidade.")
             
-            for _ in range(min(len(email_values) * 2, limit_per_type)):
-                col_ref = random.choice(other_cols) if other_cols else list(col_values.keys())[0]
-                val_ref = random.choice(col_values[col_ref])
+            # Vetorizar e Salvar
+            total_final = len(all_patterns)
+            final_patterns_with_vectors = []
+            
+            for idx, p in enumerate(all_patterns):
+                if progress_callback and idx % 10 == 0:
+                    progress_callback(50 + int((idx/total_final)*45), 100, f"Vetorizando {idx+1}/{total_final}...", 0)
                 
-                exclude_domains = ["ROHDEN", "GMAIL", "OUTLOOK", "HOTMAIL", "TERRA", "YAHOO"]
-                domain = random.choice(exclude_domains)
-                
-                excl_templates = [
-                    f"qual o email de {val_ref} que não seja {domain.lower()}",
-                    f"buscar email de {val_ref} exceto {domain.lower()}",
-                    f"contato de {val_ref} sem ser do {domain.lower()}",
-                    f"me dê o email de {val_ref} (filtrar fora {domain.lower()})",
-                    f"quero o email não corporativo de {val_ref} ({domain.lower()})"
-                ]
-                
-                user_input = random.choice(excl_templates)
-                update_progress(f"Vetorizando filtro: {user_input[:30]}...")
-                
-                # VETORIZAÇÃO OBRIGATÓRIA (Sem Fallback)
-                vector = self.vector_manager.generate_embedding(user_input)
-                if not vector:
+                # Filtro final de segurança contra IDs lixo
+                if self._is_junk_id_query(p.get('user_input', '')):
                     continue
-                
-                patterns.append({
-                    "situation": f"Busca com filtro de exclusão de domínio ({domain})",
-                    "user_input": user_input,
-                    "ai_action": "DATA_ANALYSIS",
-                    "ai_response": json.dumps(query_plan),
-                    "category": "Busca Filtrada",
-                    "tags": f"{table_name}, exclusao, email, sintético",
-                    "embedding_vector": self.vector_manager.vector_to_blob(vector)
-                })
 
-        # 4. Gerar Padrões de Agregação (COUNT)
-        count_templates = [
-            f"quantos {table_name} existem",
-            f"total de {table_name}",
-            f"contar {table_name}",
-            f"qual a quantidade de registros em {table_name}",
-            f"me diga o número total de {table_name}"
-        ]
+                vector = self.vector_manager.generate_embedding(p['user_input'])
+                if vector:
+                    p['embedding_vector'] = self.vector_manager.vector_to_blob(vector)
+                    final_patterns_with_vectors.append(p)
+
+            if final_patterns_with_vectors:
+                print(f"✅ Salvando {len(final_patterns_with_vectors)} padrões 100% autônomos...")
+                self.storage.batch_save_behavioral_patterns(final_patterns_with_vectors)
+                return len(final_patterns_with_vectors)
+            
+            return 0
+
+        except Exception as e:
+            print(f"❌ Erro na geração autônoma: {e}")
+            return 0
+
+    def _generate_autonomous_batches(self, table_name, columns, samples, engine) -> List[Dict]:
+        """Gera em lotes para manter a autonomia sem estourar o contexto da IA"""
+        all_p = []
+        schema_text = "\n".join([f"- {c['name']} ({c.get('type', 'TEXT')})" for c in columns])
         
-        for user_input in count_templates:
-            update_progress(f"Vetorizando contagem...")
-            # VETORIZAÇÃO OBRIGATÓRIA
-            vector = self.vector_manager.generate_embedding(user_input)
-            if not vector:
+        system_prompt = "Você é um Analista de Dados. Entenda a tabela e gere perguntas e respostas REAIS sem usar IDs."
+
+        # Realiza 4 tentativas (lotes) para diversificar os dados usados
+        for b in range(4):
+            print(f"   -> Samuca analisando Lote {b+1}/4...")
+            # Pega uma fatia diferente dos dados em cada lote
+            start_idx = (b * 15) % len(samples)
+            batch_samples = samples[start_idx : start_idx + 15]
+            
+            prompt = f"""Tabela: {table_name}
+Estrutura: {schema_text}
+Amostra: {json.dumps(batch_samples, ensure_ascii=False)}
+
+MISSÃO:
+1. Gere 20 padrões JSON variados.
+2. Cada padrão deve ter: user_input, ai_response, situation, category, ai_action: CHAT.
+3. FOCO EM NOMES E TEXTOS, NUNCA EM IDs.
+4. Converta qualquer ID da amostra no nome correspondente na pergunta.
+"""
+            
+            try:
+                resp = engine._call_ai_with_limits(prompt, system_prompt, 4000, 12000)
+                extracted = self._extract_patterns_from_response(resp)
+                if extracted:
+                    # Filtrar IDs imediatamente
+                    valid = [p for p in extracted if not self._is_junk_id_query(p.get('user_input', ''))]
+                    all_p.extend(valid)
+            except Exception as e:
+                print(f"      ! Falha no lote {b+1}: {e}")
                 continue
+                
+        return all_p
 
-            patterns.append({
-                "situation": f"Contagem total de registros em {table_name}",
-                "user_input": user_input,
-                "ai_action": "DATA_ANALYSIS",
-                "ai_response": json.dumps({
-                    "action": "DATA_ANALYSIS",
-                    "plan": {"type": "SELECT", "table": table_name, "aggregations": [{"func": "COUNT", "field": "*"}]}
-                }),
-                "category": "Pergunta de Dados",
-                "tags": f"{table_name}, count, sintético",
-                "embedding_vector": self.vector_manager.vector_to_blob(vector)
-            })
-
-        # 5. Salvar em lote para performance
-        if patterns:
-            print(f"Salvando {len(patterns)} novos padrões sintéticos vetorizados no banco...")
-            self.storage.batch_save_behavioral_patterns(patterns)
-            print("✅ Padrões sintéticos vetorizados salvos com sucesso.")
+    def _is_junk_id_query(self, text: str) -> bool:
+        """Detecta se a pergunta é apenas um ID numérico ou busca por ID (lixo de treinamento)"""
+        if not text: return True
         
-        return len(patterns)
+        # Se tem 3 ou mais números seguidos e pouca letra, é provável que seja busca por ID
+        # Ex: "buscar 5215", "quem é 102", "ID 999"
+        numbers = re.findall(r'\d{2,}', text) # Reduzi para 2 números para ser mais rígido
+        
+        # Se a string é muito curta e contém números, bloqueia
+        if numbers and len(text) < 25:
+            return True
+            
+        # Bloqueia se contiver a palavra ID seguida de números
+        if re.search(r'ID\s*\d+', text, re.IGNORECASE):
+            return True
+            
+        # Palavras chave de busca por ID
+        bad_patterns = ['BUSCAR ID', 'QUEM É ID', 'PESQUISAR ID', 'ID ', 'CÓDIGO', 'CODIGO']
+        if any(x in text.upper() for x in bad_patterns):
+            # Se tiver a palavra código/ID mas for uma pergunta longa e natural, talvez seja válida
+            # Mas se for curta, bloqueia.
+            if len(text) < 30:
+                return True
+        
+        return False
+
+    def _extract_patterns_from_response(self, text: str) -> List[Dict]:
+        """Extrai JSON da resposta da IA de forma robusta"""
+        if not text: return []
+        
+        results = []
+        # Tenta encontrar o array completo
+        array_match = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
+        if array_match:
+            try:
+                data = json.loads(array_match.group(0))
+                if isinstance(data, list):
+                    results = data
+            except:
+                pass
+        
+        # Se falhou, tenta objetos individuais
+        if not results:
+            objs = re.findall(r'\{[^{}]*\}', text, re.DOTALL)
+            for obj_str in objs:
+                try:
+                    item = json.loads(obj_str)
+                    if isinstance(item, dict) and 'user_input' in item:
+                        results.append(item)
+                except:
+                    continue
+        
+        # Validação básica
+        valid = []
+        for item in results:
+            if isinstance(item, dict) and item.get('user_input') and item.get('ai_response'):
+                valid.append(item)
+        
+        return valid

@@ -117,17 +117,35 @@ class TableTrainer:
         # 5. Salvar no Storage
         self.storage.save_tables([table_meta])
         
-        # 6. Geração Massiva de Padrões Sintéticos (Imitação Preventiva)
+        # 6. Geração de Padrões 100% Autônoma via IA Local (Samuca)
         try:
-            # O SyntheticGenerator vai usar de 50% a 95% do progresso
-            def synth_callback(curr, total, msg, remaining):
+            def synth_callback(curr, total, msg, remaining=0):
                 if progress_callback:
-                    p = 50 + int((curr / total) * 45)
+                    p = 50 + int((curr / (total if total > 0 else 1)) * 45)
                     progress_callback(p, msg, remaining)
 
-            self.synthetic_gen.generate_for_table(table_name, profile, columns, sample_data, progress_callback=synth_callback)
+            print(f"Acionando Samuca para análise autônoma da tabela {table_name}...")
+            print("--- FOCO: Entender o propósito da tabela antes de gerar perguntas ---")
+            
+            patterns_count = self.synthetic_gen.generate_with_ai(
+                table_name, 
+                columns, 
+                sample_data, 
+                profile=profile, 
+                total_records=total_records, 
+                progress_callback=synth_callback
+            )
+            
+            if patterns_count == 0:
+                error_msg = f"A IA não conseguiu entender ou gerar padrões para a tabela {table_name}. Verifique se os dados da amostra são suficientes."
+                print(f"⚠️ {error_msg}")
+                # Não permitimos mais Plano B. Se a IA falhou, o treinamento é considerado incompleto.
+            else:
+                print(f"✅ Treinamento 100% autônomo concluído: {patterns_count} padrões gerados pelo Samuca.")
+            
         except Exception as e:
-            print(f"⚠️ Aviso: Falha na geração de padrões sintéticos: {e}")
+            print(f"❌ Erro crítico na geração de padrões por IA: {e}")
+            raise e 
 
         update_p("Treinamento concluído!", 100)
 
