@@ -1,185 +1,205 @@
-import random
 import json
 import re
-from typing import List, Dict, Any
-from ..ENGINE.vector_manager import VectorManager
+import random
+import time
+from typing import List, Dict, Optional
+from ..ENGINE.ai_engine import get_llama_engine
 
 class SyntheticPatternGenerator:
     """
-    Gerador 100% Autônomo de Padrões de Treinamento via IA Local (Samuca).
-    A IA analisa a estrutura, entende o propósito e gera perguntas naturais sem intervenção humana.
+    Gerador de padrões de treinamento 100% autônomo via IA Local.
+    Elimina heurísticas manuais e foca no entendimento da IA sobre os dados.
     """
     
-    def __init__(self, storage):
+    def __init__(self, storage=None):
         self.storage = storage
-        self.vector_manager = VectorManager()
+        self.engine = get_llama_engine()
+        # Regex para detectar IDs (números com 3 ou mais dígitos que parecem chaves primárias)
+        self.id_pattern = re.compile(r'\b\d{3,}\b')
+        # Regex para detectar perguntas focadas puramente em IDs
+        self.id_focus_pattern = re.compile(r'(buscar|ver|onde|quem|id|código|tabela).*\b\d{2,}\b', re.IGNORECASE)
 
     def generate_with_ai(self, table_name: str, columns: List[Dict], sample_data: List[Dict], profile: Dict = None, total_records: int = 0, progress_callback=None):
         """
-        Geração Principal Autônoma.
+        Geração 100% autônoma. A IA analisa a estrutura e dados para entender o propósito
+        e gerar perguntas naturais que um usuário faria.
         """
-        from ..ENGINE.ai_engine import LlamaEngine
-        engine = LlamaEngine()
-        
-        print(f"--- Iniciando Geração 100% Autônoma para {table_name} ---")
-        if progress_callback:
-            progress_callback(0, 100, f"Samuca analisando {table_name}...", 0)
-
-        # Preparar contexto técnico puro (sem dicas manuais)
-        schema_summary = []
-        for c in columns:
-            col_name = c['name']
-            col_info = f"- {col_name} ({c.get('type', 'TEXT')})"
-            schema_summary.append(col_info)
-        
-        schema_text = "\n".join(schema_summary)
-        samples = sample_data[:60] # Amostra generosa para a IA entender o contexto
-        
-        # PROMPT 100% AUTÔNOMO: A IA deve descobrir o que a tabela faz.
-        system_prompt = """Você é um Analista de Dados Sênior da Rohden.
-Sua tarefa é analisar a estrutura e os dados de uma tabela e gerar padrões de treinamento para uma IA de atendimento.
-
-REGRAS CRÍTICAS DE NEGÓCIO:
-1. ANALISE PRIMEIRO: Olhe para as colunas e os dados da amostra. Entenda o propósito real desta tabela (ex: é uma tabela de preços? de estoque? de contatos? de log?). Não assuma nada antes de olhar os dados.
-2. PERGUNTAS NATURAIS: Gere perguntas que um usuário real faria (ex: "Quem é...", "Qual o contato de...", "Quais os pedidos de...").
-3. PROIBIDO IDs: NUNCA use IDs numéricos (ex: 5215, 102, 001) nas perguntas. Um usuário nunca pergunta por ID. Converta IDs em nomes reais presentes nos dados.
-4. FOCO EM DADOS TEXTUAIS: Busque por nomes, descrições, e-mails, endereços e informações que humanos entendem.
-5. RESPOSTA RICA: A 'ai_response' deve ser completa e informativa, usando os dados da amostra.
-6. ZERO HEURÍSTICA: Não use padrões pré-definidos. Deixe a IA decidir o que é importante.
-"""
-
-        try:
-            # Geração em lotes para garantir qualidade e evitar timeouts do Ollama
-            all_patterns = self._generate_autonomous_batches(table_name, columns, samples, engine)
-            
-            if not all_patterns:
-                print(f"⚠️ Samuca não conseguiu gerar padrões autônomos para {table_name}.")
-                return 0
-
-            print(f"🧠 Samuca gerou {len(all_patterns)} padrões autônomos de alta qualidade.")
-            
-            # Vetorizar e Salvar
-            total_final = len(all_patterns)
-            final_patterns_with_vectors = []
-            
-            for idx, p in enumerate(all_patterns):
-                if progress_callback and idx % 10 == 0:
-                    progress_callback(50 + int((idx/total_final)*45), 100, f"Vetorizando {idx+1}/{total_final}...", 0)
-                
-                # Filtro final de segurança contra IDs lixo
-                if self._is_junk_id_query(p.get('user_input', '')):
-                    continue
-
-                vector = self.vector_manager.generate_embedding(p['user_input'])
-                if vector:
-                    p['embedding_vector'] = self.vector_manager.vector_to_blob(vector)
-                    final_patterns_with_vectors.append(p)
-
-            if final_patterns_with_vectors:
-                print(f"✅ Salvando {len(final_patterns_with_vectors)} padrões 100% autônomos...")
-                self.storage.batch_save_behavioral_patterns(final_patterns_with_vectors)
-                return len(final_patterns_with_vectors)
-            
+        if not sample_data:
+            print(f"⚠️ Sem dados de amostra para {table_name}. Abortando geração por IA.")
             return 0
 
-        except Exception as e:
-            print(f"❌ Erro na geração autônoma: {e}")
+        # Preparar o contexto da tabela
+        schema_text = "\n".join([f"- {c['name']} ({c.get('type', 'TEXT')}): {c.get('comment', '')}" for c in columns])
+        
+        # Iniciar geração em lotes para estabilidade e diversidade
+        all_patterns = self._generate_autonomous_batches(
+            table_name, 
+            schema_text, 
+            sample_data, 
+            progress_callback
+        )
+        
+        if not all_patterns:
             return 0
 
-    def _generate_autonomous_batches(self, table_name, columns, samples, engine) -> List[Dict]:
-        """Gera em lotes para manter a autonomia sem estourar o contexto da IA"""
-        all_p = []
-        schema_text = "\n".join([f"- {c['name']} ({c.get('type', 'TEXT')})" for c in columns])
-        
-        system_prompt = "Você é um Analista de Dados. Entenda a tabela e gere perguntas e respostas REAIS sem usar IDs."
-
-        # Realiza 4 tentativas (lotes) para diversificar os dados usados
-        for b in range(4):
-            print(f"   -> Samuca analisando Lote {b+1}/4...")
-            # Pega uma fatia diferente dos dados em cada lote
-            start_idx = (b * 15) % len(samples)
-            batch_samples = samples[start_idx : start_idx + 15]
-            
-            prompt = f"""Tabela: {table_name}
-Estrutura: {schema_text}
-Amostra: {json.dumps(batch_samples, ensure_ascii=False)}
-
-MISSÃO:
-1. Gere 20 padrões JSON variados.
-2. Cada padrão deve ter: user_input, ai_response, situation, category, ai_action: CHAT.
-3. FOCO EM NOMES E TEXTOS, NUNCA EM IDs.
-4. Converta qualquer ID da amostra no nome correspondente na pergunta.
-"""
-            
+        # Salvar padrões gerados
+        count = 0
+        for p in all_patterns:
             try:
-                resp = engine._call_ai_with_limits(prompt, system_prompt, 4000, 12000)
-                extracted = self._extract_patterns_from_response(resp)
-                if extracted:
-                    # Filtrar IDs imediatamente
-                    valid = [p for p in extracted if not self._is_junk_id_query(p.get('user_input', ''))]
-                    all_p.extend(valid)
-            except Exception as e:
-                print(f"      ! Falha no lote {b+1}: {e}")
-                continue
+                # Enriquecer com metadados obrigatórios
+                p['table_name'] = table_name
+                p['source'] = 'SAMUCA_AI_AUTONOMOUS'
                 
-        return all_p
+                if self.storage:
+                    self.storage.save_behavioral_pattern(p)
+                count += 1
+            except Exception as e:
+                print(f"Erro ao salvar padrão: {e}")
 
-    def _is_junk_id_query(self, text: str) -> bool:
-        """Detecta se a pergunta é apenas um ID numérico ou busca por ID (lixo de treinamento)"""
-        if not text: return True
+        return count
+
+    def _generate_autonomous_batches(self, table_name: str, schema_text: str, samples: List[Dict], progress_callback=None):
+        """
+        Divide a geração em lotes pequenos para não sobrecarregar o Samuca e garantir qualidade.
+        """
+        all_generated = []
         
-        # Se tem 3 ou mais números seguidos e pouca letra, é provável que seja busca por ID
-        # Ex: "buscar 5215", "quem é 102", "ID 999"
-        numbers = re.findall(r'\d{2,}', text) # Reduzi para 2 números para ser mais rígido
+        # Configuração de lotes para estabilidade (10 lotes de 5 amostras)
+        num_batches = 10
+        samples_per_batch = 5
+        patterns_per_batch = 5
         
-        # Se a string é muito curta e contém números, bloqueia
-        if numbers and len(text) < 25:
+        system_prompt = f"""Você é o 'Samuca', o especialista em dados da Rohden.
+Sua missão é ANALISAR a estrutura de uma tabela e uma amostra de dados reais para entender PARA QUE ela serve.
+Após entender o propósito,gere resumidamente o proposito dela e tambem  gere perguntas e respostas NATURAIS que um funcionário da Rohden faria sobre esses dados.
+
+REGRAS CRÍTICAS:
+1. NUNCA use IDs ou códigos numéricos nas perguntas (ex: 'buscar 5215' é PROIBIDO).
+2. Use dados que aparecem na amostra.
+3. Se encontrar um ID na amostra, busque o NOME ou DESCRIÇÃO correspondente na mesma linha para usar na pergunta.
+4. As perguntas devem ser variadas , faça o maximo possivel de perguntas diferentes.
+5. Importante: Para perguntas de contagem, o ai_action deve ser 'DATA_ANALYSIS' e a ai_response deve focar no número total.
+6. Responda SEMPRE em formato JSON puro, uma lista de objetos.
+7. Cada objeto deve ter: user_input, ai_response, situation, category e ai_action: 'CHAT' ou 'DATA_ANALYSIS'.
+
+Exemplo de formato esperado:
+[
+  {{
+    "user_input": "Quem é o contato da empresa X?",
+    "ai_response": "O contato principal é Fulano de Tal.",
+    "situation": "Busca de contato por empresa",
+    "category": "CONTATOS",
+    "ai_action": "CHAT"
+  }},
+  {{
+    "user_input": "Quantos contatos temos cadastrados?",
+    "ai_response": "Atualmente temos 150 contatos registrados.",
+    "situation": "Contagem total de registros",
+    "category": "CONTATOS",
+    "ai_action": "DATA_ANALYSIS"
+  }}
+]
+"""
+
+        for b in range(num_batches):
+            try:
+                msg = f"Samuca analisando Lote {b+1}/{num_batches} de {table_name}..."
+                if progress_callback:
+                    progress_callback(b, num_batches, msg)
+                
+                print(f"   -> {msg}")
+                
+                # Selecionar amostra aleatória para este lote
+                batch_samples = random.sample(samples, min(samples_per_batch, len(samples)))
+                
+                prompt = f"""ANALISE ESTA TABELA: {table_name}
+ESTRUTURA:
+{schema_text}
+
+AMOSTRA DE DADOS REAIS:
+{json.dumps(batch_samples, ensure_ascii=False, indent=2, default=str)}
+
+TAREFA:
+1. Entenda o que esta tabela representa no contexto da Rohden.
+2. Gere {patterns_per_batch} padrões de conversação (JSON) baseados nestes dados específicos.
+3. Garanta que pelo menos 1 pergunta seja de CONTAGEM TOTAL ou SOMA (ex: 'quantos contatos...', 'qual o valor total...').
+4. Foque em perguntas humanas reais. Ignore colunas técnicas de sistema (IDs internos, flags de deleção).
+5. Converta IDs de sistema em nomes legíveis na pergunta.
+"""
+
+                # Chamada com limites conservadores para estabilidade
+                response = self.engine._call_ai_with_limits(
+                    prompt, 
+                    system_prompt=system_prompt,
+                    num_predict=1000,
+                    num_ctx=4000
+                )
+                
+                batch_patterns = self._extract_patterns_from_response(response)
+                
+                # Filtrar padrões inúteis (focados em ID ou vazios)
+                filtered = [p for p in batch_patterns if not self._is_meaningless_pattern(p)]
+                
+                all_generated.extend(filtered)
+                
+                # Pequena pausa para o servidor respirar entre lotes
+                time.sleep(1)
+                
+            except Exception as e:
+                print(f"Erro no lote {b+1}: {e}")
+                continue
+
+        return all_generated
+
+    def _is_meaningless_pattern(self, pattern: Dict) -> bool:
+        """
+        Detecta se um padrão gerado pela IA é inútil ou focado em IDs.
+        """
+        user_input = pattern.get('user_input', '').strip()
+        
+        if not user_input or len(user_input) < 5:
             return True
             
-        # Bloqueia se contiver a palavra ID seguida de números
-        if re.search(r'ID\s*\d+', text, re.IGNORECASE):
+        # Bloquear perguntas que contêm IDs numéricos longos (3+ dígitos)
+        if self.id_pattern.search(user_input):
             return True
             
-        # Palavras chave de busca por ID
-        bad_patterns = ['BUSCAR ID', 'QUEM É ID', 'PESQUISAR ID', 'ID ', 'CÓDIGO', 'CODIGO']
-        if any(x in text.upper() for x in bad_patterns):
-            # Se tiver a palavra código/ID mas for uma pergunta longa e natural, talvez seja válida
-            # Mas se for curta, bloqueia.
-            if len(text) < 30:
-                return True
-        
+        # Bloquear padrões mecânicos de busca por ID
+        if self.id_focus_pattern.search(user_input):
+            return True
+            
         return False
 
-    def _extract_patterns_from_response(self, text: str) -> List[Dict]:
-        """Extrai JSON da resposta da IA de forma robusta"""
-        if not text: return []
-        
-        results = []
-        # Tenta encontrar o array completo
-        array_match = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
-        if array_match:
-            try:
-                data = json.loads(array_match.group(0))
-                if isinstance(data, list):
-                    results = data
-            except:
-                pass
-        
-        # Se falhou, tenta objetos individuais
-        if not results:
-            objs = re.findall(r'\{[^{}]*\}', text, re.DOTALL)
-            for obj_str in objs:
-                try:
-                    item = json.loads(obj_str)
-                    if isinstance(item, dict) and 'user_input' in item:
-                        results.append(item)
-                except:
-                    continue
-        
-        # Validação básica
-        valid = []
-        for item in results:
-            if isinstance(item, dict) and item.get('user_input') and item.get('ai_response'):
-                valid.append(item)
-        
-        return valid
+    def _extract_patterns_from_response(self, response: str) -> List[Dict]:
+        """
+        Extrai e limpa a lista de padrões JSON da resposta da IA.
+        """
+        try:
+            # Tentar encontrar o bloco JSON na resposta
+            json_match = re.search(r'\[\s*\{.*\}\s*\]', response, re.DOTALL)
+            if json_match:
+                content = json_match.group(0)
+            else:
+                content = response
+                
+            # Limpezas comuns
+            content = content.strip()
+            if content.startswith('```json'):
+                content = content[7:]
+            if content.endswith('```'):
+                content = content[:-3]
+            
+            data = json.loads(content)
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                return [data]
+            return []
+        except Exception as e:
+            print(f"Erro ao parsear JSON da IA: {e}")
+            # Log do erro para debug se necessário
+            return []
+
+    def _clean_json_response(self, text: str) -> str:
+        """Limpeza adicional se necessário"""
+        return text.strip()

@@ -1177,6 +1177,82 @@
     .sidebar-overlay.visible {
         display: block;
     }
+    .mode-toggle {
+        display: flex;
+        background: #e5e7eb;
+        padding: 3px;
+        border-radius: 20px;
+        margin-right: 12px;
+        border: none;
+        position: relative;
+        width: 180px;
+        height: 36px;
+    }
+
+    .mode-btn {
+        flex: 1;
+        padding: 0;
+        border-radius: 17px;
+        border: none;
+        background: transparent;
+        color: #4b5563;
+        font-size: 0.75rem;
+        font-weight: 700;
+        cursor: pointer;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        z-index: 2;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .mode-btn i {
+        font-size: 0.85rem;
+    }
+
+    .mode-btn.active {
+        color: var(--primary-blue);
+    }
+
+    /* Indicador deslizante */
+    .mode-toggle::after {
+        content: '';
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: calc(50% - 3px);
+        height: calc(100% - 6px);
+        background: white;
+        border-radius: 17px;
+        transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        z-index: 1;
+    }
+
+    .mode-toggle.agente-active::after {
+        transform: translateX(100%);
+    }
+
+    .mode-btn:hover:not(.active) {
+        color: #1f2937;
+    }
+
+    /* Ajuste para mobile */
+    @media (max-width: 600px) {
+        .mode-toggle {
+            width: 140px;
+            margin-right: 8px;
+        }
+        .mode-btn span {
+            display: none;
+        }
+        .mode-btn {
+            font-size: 0.7rem;
+        }
+    }
 </style>
 
 <!-- SVG Definitions -->
@@ -1367,6 +1443,16 @@
                     <textarea class="input-field" id="inputField" rows="1" placeholder="Digite sua mensagem..."></textarea>
                     <div class="input-actions">
                         <div class="input-tools">
+                            <div class="mode-toggle" id="modeToggle">
+                                <button class="mode-btn active" onclick="setChatMode('chat')" title="Modo Conversa">
+                                    <i class="bi bi-chat-dots"></i>
+                                    <span>Chat</span>
+                                </button>
+                                <button class="mode-btn" onclick="setChatMode('agente')" title="Modo Agente (Empresa)">
+                                    <i class="bi bi-robot"></i>
+                                    <span>Agente</span>
+                                </button>
+                            </div>
                             <button class="tool-btn" onclick="attachFile()" title="Anexar arquivo">
                                 <i class="bi bi-paperclip"></i>
                             </button>
@@ -1406,10 +1492,6 @@
             </div>
         </div>
         <div class="sidebar-actions">
-            <button class="sidebar-action-btn" onclick="selectMode()">
-                <i class="bi bi-check2-square"></i>
-                Selecionar
-            </button>
             <button class="sidebar-action-btn danger" onclick="clearAll()">
                 <i class="bi bi-trash3"></i>
                 Limpar
@@ -1446,10 +1528,37 @@ document.addEventListener('DOMContentLoaded', function() {
     const historySidebar = document.getElementById('historySidebar');
     const sidebarOverlay = document.getElementById('sidebarOverlay');
 
+    let currentMode = 'chat';
     let chatId = null;
     let history = [];
     let processing = false;
     let hasMessages = false;
+
+    // Mode Selector
+    window.setChatMode = function(mode) {
+        currentMode = mode;
+        const toggle = document.getElementById('modeToggle');
+        const btns = document.querySelectorAll('.mode-btn');
+        
+        if (mode === 'agente') {
+            toggle.classList.add('agente-active');
+        } else {
+            toggle.classList.remove('agente-active');
+        }
+
+        btns.forEach(btn => {
+            if (btn.getAttribute('onclick').includes(`'${mode}'`)) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+        
+        // Update placeholder based on mode
+        inputField.placeholder = mode === 'chat' 
+            ? 'Converse com o Samuca...' 
+            : 'Pergunte sobre dados da empresa (Modo Agente)...';
+    };
 
     // Load history
     loadHistoryList();
@@ -1502,7 +1611,12 @@ document.addEventListener('DOMContentLoaded', function() {
             const r = await fetch('{{ url_for("rohden_ai_chat_bp.ask") }}', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: msg, chat_id: chatId, history: history })
+                body: JSON.stringify({ 
+                    prompt: msg, 
+                    chat_id: chatId, 
+                    history: history,
+                    mode: currentMode 
+                })
             });
             const data = await r.json();
             aiThinking.classList.remove('visible');

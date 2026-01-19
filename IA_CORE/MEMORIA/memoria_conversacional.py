@@ -388,123 +388,49 @@ class MemoriaConversacional:
 
     def _resolve_contradictions(self, user_name, cursor):
         """Tenta resolver contradições simples na memória"""
-        # Por agora, uma implementação básica que remove memórias muito antigas se houver novas do mesmo tipo
-        pass
-    
-    def _consolidate_memory_group(self, user_name, memory_group, cursor):
-        """Consolida um grupo de memórias similares no Oracle"""
-        if len(memory_group) <= 1:
-            return
-        
-        # Manter a memória mais importante e recente
-        consolidated = max(memory_group, key=lambda m: (m['IMPORTANCE'], m['CREATED_AT']))
-        
-        # Combinar conteúdos similares
-        all_contents = [m['CONTENT'] for m in memory_group]
-        unique_words = set()
-        for content in all_contents:
-            unique_words.update(content.lower().split())
-        
-        # Criar conteúdo consolidado
-        consolidated_content = f"Consolidado: {' '.join(list(unique_words)[:10])}"
-        
-        # Aumentar importância baseada na frequência
-        new_importance = min(5, consolidated['IMPORTANCE'] + len(memory_group) - 1)
-        
-        # Atualizar memória principal
+        # 1. Buscar memórias por tipo para comparar
         cursor.execute('''
-        UPDATE SYSROH.TB_AI_CONTEXTUAL_MEMORY 
-        SET CONTENT = :content, IMPORTANCE = :imp
-        WHERE ID = :id
-        ''', {'content': consolidated_content, 'imp': new_importance, 'id': consolidated['ID']})
+            SELECT id, content, context_type, created_at 
+            FROM tb_ai_contextual_memory 
+            WHERE user_name = ?
+            ORDER BY context_type, created_at DESC
+        ''', (user_name,))
         
-        # Remover memórias duplicadas
-        duplicate_ids = [m['ID'] for m in memory_group if m['ID'] != consolidated['ID']]
-        if duplicate_ids:
-            for d_id in duplicate_ids:
-                cursor.execute('DELETE FROM SYSROH.TB_AI_CONTEXTUAL_MEMORY WHERE ID = :id', {'id': d_id})
-    
-    def _resolve_contradictions(self, user_name, cursor):
-        """Detecta e resolve contradições nas preferências usando Oracle"""
-        # Buscar preferências que podem contradizer
-        cursor.execute('''
-        SELECT CONTENT, IMPORTANCE FROM SYSROH.TB_AI_CONTEXTUAL_MEMORY 
-        WHERE USER_NAME = :uname AND CONTEXT_TYPE = 'preference'
-        AND (EXPIRES_AT IS NULL OR EXPIRES_AT > CURRENT_TIMESTAMP)
-        ''', {'uname': user_name})
+        memories = [dict(row) for row in cursor.fetchall()]
         
-        preferences = []
-        for row in cursor.fetchall():
-            content = row[0]
-            if hasattr(content, 'read'):
-                content = content.read()
-            preferences.append({'CONTENT': content, 'IMPORTANCE': row[1]})
-        
-        # Detectar contradições de formato
-        format_preferences = {}
-        for pref in preferences:
-            content = pref['CONTENT'].lower()
-            if 'tabela' in content:
-                format_preferences['tabela'] = format_preferences.get('tabela', 0) + pref['IMPORTANCE']
-            elif 'gráfico' in content:
-                format_preferences['grafico'] = format_preferences.get('grafico', 0) + pref['IMPORTANCE']
-            elif 'resumo' in content:
-                format_preferences['resumo'] = format_preferences.get('resumo', 0) + pref['IMPORTANCE']
-        
-        # Se houver contradição, manter a preferência mais forte
-        if len(format_preferences) > 1:
-            strongest_format = max(format_preferences, key=format_preferences.get)
+        # Agrupar por tipo
+        by_type = {}
+        for m in memories:
+            t = m['context_type']
+            if t not in by_type: by_type[t] = []
+            by_type[t].append(m)
             
-            # Remover preferências contraditórias
-            for format_type in format_preferences:
-                if format_type != strongest_format:
-                    cursor.execute('''
-                    DELETE FROM SYSROH.TB_AI_CONTEXTUAL_MEMORY 
-                    WHERE USER_NAME = :uname AND CONTEXT_TYPE = 'preference' 
-                    AND LOWER(CAST(CONTENT AS VARCHAR2(4000))) LIKE :fmt
-                    ''', {'uname': user_name, 'fmt': f'%{format_type}%'})
+        # Para cada tipo, se houver muitas memórias, remove as mais antigas que overlap keywords
+        for t, group in by_type.items():
+            if len(group) < 2: continue
             
-            # Adicionar memória consolidada
-            self.learn_contextual_fact(
-                user_name, 
-                f"Preferência consolidada: {strongest_format}", 
-                'preference', 
-                5,  # Máxima importância
-                90  # Expira em 90 dias
-            )
-    
-    def _analyze_sentiment(self, user_query, ai_response):
-        """Analisa sentimento básico"""
-        negative_words = ['ruim', 'errado', 'não gostei', 'horrível', 'péssimo', 'lento', 'erro']
-        positive_words = ['bom', 'ótimo', 'excelente', 'parabéns', 'obrigado', 'vlw', 'ajudou']
-        
-        score = 0
-        for word in negative_words:
-            if word in user_query.lower():
-                score -= 1
-        for word in positive_words:
-            if word in user_query.lower():
-                score += 1
-        return score
-
-    def extract_learning_from_interaction(self, user_name, user_query, ai_response):
-        """Extrai aprendizado automático da interação"""
-        # Detectar preferências de formato
-        if 'tabela' in user_query.lower() or '|'.join(ai_response.split()) in ai_response:
-            self.learn_contextual_fact(user_name, "Prefere ver dados em formato de tabela", "preference", 3)
-        
-        # Detectar métricas importantes
-        metrics = re.findall(r'\b(valor|total|média|quantidade|receita|lucro)\b', user_query.lower())
-        for metric in metrics[:2]:
-            self.learn_contextual_fact(user_name, f"Interesse em métricas de {metric}", "metric", 2)
-        
-        # Análise de sentimento
-        sentiment_score = self._analyze_sentiment(user_query, ai_response)
-        if sentiment_score < 0:
-            self.learn_contextual_fact(user_name, "Possível insatisfação com resposta anterior", "feedback", 4, 30)
-
-        if self._is_repeated_question(user_name, user_query):
-            self.learn_contextual_fact(user_name, "Pergunta repetida - resposta anterior pode não ter sido clara", "feedback", 3, 15)
+            to_delete = []
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    m1 = group[i] # Mais recente
+                    m2 = group[j] # Mais antiga
+                    
+                    if m2['id'] in to_delete: continue
+                    
+                    # Se houver overlap de palavras chave importantes (> 50%)
+                    # consideramos que a mais recente atualiza a mais antiga
+                    words1 = set(re.findall(r'\w{4,}', m1['content'].lower()))
+                    words2 = set(re.findall(r'\w{4,}', m2['content'].lower()))
+                    
+                    if not words1 or not words2: continue
+                    
+                    overlap = words1.intersection(words2)
+                    if len(overlap) / min(len(words1), len(words2)) > 0.5:
+                        to_delete.append(m2['id'])
+            
+            if to_delete:
+                cursor.execute(f"DELETE FROM tb_ai_contextual_memory WHERE id IN ({','.join(['?']*len(to_delete))})", to_delete)
+                print(f"🧹 Resolvidas {len(to_delete)} contradições/redundâncias para {user_name} no tipo {t}")
     
     def _analyze_sentiment(self, user_query, ai_response):
         """Análise de sentimento básica da interação"""
@@ -531,25 +457,31 @@ class MemoriaConversacional:
         if total_indicators == 0:
             return 0  # Neutro
         
-        return (positive_count - negative_count) / total_indicators
+        return (positive_count - negative_count) / (total_indicators if total_indicators > 0 else 1)
     
     def _is_repeated_question(self, user_name, current_query):
         """Verifica se a pergunta atual é similar a perguntas recentes"""
-        conn = get_db_connection()
+        conn = db_history.get_db_connection()
+        if not conn: return False
         cursor = conn.cursor()
         
         # Buscar perguntas recentes (últimas 24 horas)
-        cursor.execute('''
-        SELECT content FROM messages m
-        JOIN chats c ON m.chat_id = c.id
-        WHERE c.user_name = ? AND m.role = 'user'
-        AND m.created_at >= datetime('now', '-1 day')
-        ORDER BY m.created_at DESC
-        LIMIT 10
-        ''', (user_name,))
-        
-        recent_queries = [row['content'] for row in cursor.fetchall()]
-        conn.close()
+        try:
+            cursor.execute('''
+            SELECT m.content FROM tb_ai_messages m
+            JOIN tb_ai_chats c ON m.chat_id = c.id
+            WHERE c.user_name = ? AND m.role = 'user'
+            AND m.created_at >= datetime('now', '-1 day')
+            ORDER BY m.created_at DESC
+            LIMIT 10
+            ''', (user_name,))
+            
+            recent_queries = [row['content'] for row in cursor.fetchall()]
+        except Exception as e:
+            print(f"Erro ao buscar perguntas repetidas: {e}")
+            recent_queries = []
+        finally:
+            conn.close()
         
         # Verificar similaridade com perguntas recentes
         for query in recent_queries:
@@ -561,37 +493,42 @@ class MemoriaConversacional:
     
     def auto_adjust_success_ratings(self, user_name):
         """Ajusta automaticamente success_rating baseado no feedback"""
-        conn = get_db_connection()
+        conn = db_history.get_db_connection()
+        if not conn: return
         cursor = conn.cursor()
         
         # Buscar feedbacks recentes
-        cursor.execute('''
-        SELECT content, created_at FROM contextual_memory
-        WHERE user_name = ? AND context_type = 'feedback'
-        AND created_at >= datetime('now', '-7 days')
-        ''', (user_name,))
-        
-        feedbacks = [dict(row) for row in cursor.fetchall()]
-        
-        # Analisar feedbacks para ajustar ratings
-        for feedback in feedbacks:
-            if 'insatisfação' in feedback['content'].lower():
-                # Reduzir rating de problemas recentes
-                cursor.execute('''
-                UPDATE problem_context 
-                SET success_rating = MAX(1, success_rating - 1)
-                WHERE user_name = ? AND created_at >= datetime('now', '-3 days')
-                ''', (user_name,))
-            elif 'ajudou' in feedback['content'].lower() or 'perfeito' in feedback['content'].lower():
-                # Aumentar rating de problemas recentes
-                cursor.execute('''
-                UPDATE problem_context 
-                SET success_rating = MIN(5, success_rating + 1)
-                WHERE user_name = ? AND created_at >= datetime('now', '-3 days')
-                ''', (user_name,))
-        
-        conn.commit()
-        conn.close()
+        try:
+            cursor.execute('''
+            SELECT content, created_at FROM tb_ai_contextual_memory
+            WHERE user_name = ? AND context_type = 'feedback'
+            AND created_at >= datetime('now', '-7 days')
+            ''', (user_name,))
+            
+            feedbacks = [dict(row) for row in cursor.fetchall()]
+            
+            # Analisar feedbacks para ajustar ratings
+            for feedback in feedbacks:
+                if 'insatisfação' in feedback['content'].lower():
+                    # Reduzir rating de problemas recentes
+                    cursor.execute('''
+                    UPDATE tb_ai_problem_context 
+                    SET success_rating = MAX(1, success_rating - 1)
+                    WHERE user_name = ? AND created_at >= datetime('now', '-3 days')
+                    ''', (user_name,))
+                elif 'ajudou' in feedback['content'].lower() or 'perfeito' in feedback['content'].lower():
+                    # Aumentar rating de problemas recentes
+                    cursor.execute('''
+                    UPDATE tb_ai_problem_context 
+                    SET success_rating = MIN(5, success_rating + 1)
+                    WHERE user_name = ? AND created_at >= datetime('now', '-3 days')
+                    ''', (user_name,))
+            
+            conn.commit()
+        except Exception as e:
+            print(f"Erro ao ajustar ratings de sucesso: {e}")
+        finally:
+            conn.close()
     
     def extract_learning_from_interaction(self, user_name, user_query, ai_response):
         """Extrai aprendizado automático da interação com análise de sentimento (otimizado)"""
@@ -647,6 +584,7 @@ class MemoriaConversacional:
         
         # Ajustar ratings baseado no feedback
         self.auto_adjust_success_ratings(user_name)
+
 
 # Instância global para uso no sistema
 memoria_system = MemoriaConversacional()

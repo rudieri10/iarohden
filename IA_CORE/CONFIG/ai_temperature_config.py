@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, date
 
 # Configurações de Temperatura para diferentes estados da IA
 AI_TEMPERATURE_SETTINGS = {
@@ -24,10 +25,27 @@ def handle_excessive_results(prompt, results, engine_instance):
         sample_data = results[:3]
         fields = list(results[0].keys()) if results else []
         
+        # Converte datetime para string para serialização JSON
+        def datetime_serializer(obj):
+            if isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            raise TypeError(f"Type {type(obj)} not serializable")
+
+        # Converte a amostra para formatos serializáveis
+        serializable_sample = []
+        for row in sample_data:
+            new_row = {}
+            for k, v in row.items():
+                if hasattr(v, 'isoformat'): # datetime ou date
+                    new_row[k] = v.isoformat()
+                else:
+                    new_row[k] = v
+            serializable_sample.append(new_row)
+
         user_prompt = (
             f"Contexto: {total_results} resultados encontrados.\n"
             f"Campos: {fields}\n"
-            f"Amostra: {json.dumps(sample_data, ensure_ascii=False)}"
+            f"Amostra: {json.dumps(serializable_sample, ensure_ascii=False)}"
         )
         
         # Chamada sem system prompt instrutivo, apenas temperatura criativa

@@ -93,6 +93,7 @@ class LlamaEngine:
     _decision_cache = {}   # Cache de decisão (CHAT/QUERY) por pergunta normalizada
     _training_cache = None
     _training_cache_time = 0
+    _failed_ai_urls = {} # Cache de URLs que falharam (url: timestamp)
 
     def __new__(cls):
         if cls._instance is None:
@@ -248,7 +249,7 @@ class LlamaEngine:
         except Exception as e:
             return f"Erro ao executar SQL: {str(e)}"
 
-    def _format_results(self, query_plan: Dict[str, Any], results: List[Dict[str, Any]]) -> str:
+    def _format_results(self, query_plan: Dict[str, Any], results: List[Dict[str, Any]], prompt: str = "") -> str:
         """
         Formata resultados brutos. 
         REGRA: Não deve conter frases completas para o usuário, apenas estrutura de dados.
@@ -256,14 +257,32 @@ class LlamaEngine:
         if not results:
             return "Nenhum dado encontrado para os critérios informados."
 
+        prompt_lower = prompt.lower() if prompt else ""
+        is_count_query = any(w in prompt_lower for w in ['quantos', 'quantas', 'total', 'quantidade', 'count'])
+
         # Caso de agregacao (ex: COUNT)
-        if query_plan.get('aggregations'):
+        is_aggregation = bool(query_plan.get('aggregations'))
+        if not is_aggregation and len(results) == 1 and len(results[0]) == 1:
+            # Se tiver apenas 1 linha e 1 coluna, provavelmente é um COUNT ou soma
+            val = list(results[0].values())[0]
+            if isinstance(val, (int, float)):
+                is_aggregation = True
+
+        if is_aggregation:
             total = None
-            for key in ['TOTAL', 'total', 'Total', 'COUNT', 'count']:
-                if key in results[0]:
+            # Tenta encontrar a coluna de total
+            for key in results[0].keys():
+                if any(k in key.upper() for k in ['COUNT', 'TOTAL', 'SOMA', 'SUM', 'QTD']):
                     total = results[0][key]
                     break
+            
+            # Se não achou por nome, mas é a única coluna numérica
+            if total is None and len(results[0]) == 1:
+                total = list(results[0].values())[0]
+
             if total is not None:
+                if is_count_query:
+                    return f"Total: {total}"
                 return f"Resultado: {total}"
 
         fields = query_plan.get('fields') or list(results[0].keys())
@@ -277,7 +296,12 @@ class LlamaEngine:
         linhas = [linha for linha in linhas if linha]
         
         total = len(results)
-        res = f"Registros: {total}\n"
+        
+        if is_count_query and total >= 50:
+            res = f"Encontrei pelo menos {total} registros (limite de visualização atingido). Para o total exato, tente refinar a busca.\n"
+        else:
+            res = f"Registros: {total}\n"
+            
         return res + "\n".join(linhas)
 
     def _format_single_row(self, row: Dict[str, Any], fields: List[str]) -> str:
@@ -313,7 +337,7 @@ class LlamaEngine:
         }
         return mapping.get(table_name.upper(), 'registro')
 
-    def _humanize_response(self, prompt: str, results: List[Dict[str, Any]], raw_text: str) -> str:
+    def _humanize_response(self, prompt: str, results: List[Dict[str, Any]], raw_text: str, skip_semantic: bool = False, query_plan: Dict = None) -> str:
         """
         Humaniza os dados brutos usando Aprendizado por Imitação (Etapa 2).
         """
@@ -321,25 +345,18 @@ class LlamaEngine:
         pattern_decision = ""
         if not results:
             pattern_decision = "⚠️ DECISÃO: Nenhum resultado encontrado. Informe amigavelmente que não localizou o registro."
-            sys_prompt_file = "humanizer_empty.txt"
         elif len(results) > 5:
             pattern_decision = "⚠️ DECISÃO: Muitos resultados encontrados (>5). Liste as opções de forma resumida e pergunte qual o usuário deseja refinar."
-            sys_prompt_file = "humanizer_judge.txt"
         elif len(results) == 1:
             pattern_decision = "✅ DECISÃO: Resultado único encontrado. Forneça a resposta direta e completa."
-            sys_prompt_file = "humanizer_judge.txt"
         else:
             pattern_decision = "✅ DECISÃO: Alguns resultados encontrados. Apresente-os de forma organizada."
-            sys_prompt_file = "humanizer_judge.txt"
 
         # ETAPA 2.1: IA Aprende por Imitação (Exemplos Similares)
-        behavior_context = self.behavior_manager.format_patterns_for_prompt(prompt)
+        behavior_context = self.behavior_manager.format_patterns_for_prompt(prompt, skip_semantic=skip_semantic)
         
-        # Preparação do Prompt do Sistema (Vazio - Seguindo regra de No-Prompts)
-        sys_prompt_base = ""
-
         # Combinamos tudo no contexto dinâmico (Apenas Padrões e Decisão)
-        full_sys_prompt = f"{behavior_context}\n\n{pattern_decision}"
+        full_sys_prompt = f"{behavior_context}\n\n{pattern_decision}\n\nResponda amigavelmente baseando-se apenas nos dados acima."
 
         # Preparação dos dados para a IA
         data_json = json.dumps(results[:10], ensure_ascii=False, default=str)
@@ -348,19 +365,29 @@ class LlamaEngine:
             f"Dados: {data_json if results else '[Vazio]'}\n"
         )
 
+        # Se a IA estiver offline, não perdemos tempo tentando
+        if self._is_ia_offline():
+            print("🔌 IA detectada como offline. Pulando humanização por imitação.")
+            return raw_text if raw_text else self._format_results(query_plan or {'fields': []}, results, prompt=prompt)
+
         try:
             # Temperatura padrão 0.2 para chat
             response = self._call_ai_with_limits(user_prompt, full_sys_prompt, num_predict=400, num_ctx=2048, temperature=0.2)
-            return response.strip() if response else raw_text
+            if not response or len(response.strip()) < 2:
+                print("⚠️ IA retornou vazio na humanização. Usando texto bruto.")
+                return raw_text if raw_text else self._format_results(query_plan or {'fields': []}, results, prompt=prompt)
+            return response.strip()
         except Exception as e:
             print(f"❌ Erro na humanização por imitação: {e}")
-            return raw_text
+            return raw_text if raw_text else self._format_results(query_plan or {'fields': []}, results, prompt=prompt)
 
-    def _find_successful_patterns(self, prompt: str) -> List[Dict]:
+    def _find_successful_patterns(self, prompt: str, skip_semantic: bool = False) -> List[Dict]:
         """Busca conversas similares bem-sucedidas no banco de padrões."""
+        if skip_semantic:
+            return self.behavior_manager.get_all_patterns(limit=3)
         return self.behavior_manager.find_similar_patterns(prompt, limit=3)
 
-    def _get_pattern(self, category_key: str) -> Dict:
+    def _get_pattern(self, category_key: str, skip_semantic: bool = False) -> Dict:
         """
         Retorna um padrão representativo para a situação atual.
         Mapeia chaves simples para categorias do banco.
@@ -384,13 +411,13 @@ class LlamaEngine:
             'ai_action': 'chat_default'
         }
 
-    def _apply_pattern(self, pattern: Dict, prompt: str, results: List[Dict]) -> str:
+    def _apply_pattern(self, pattern: Dict, prompt: str, results: List[Dict], skip_semantic: bool = False, query_plan: Dict = None) -> str:
         """
         Usa a IA apenas para 'preencher o template' baseado no padrão selecionado.
         """
         # Se não houver padrão real (apenas o fallback mínimo), usamos o humanizer padrão
         if not pattern or pattern.get('ai_action') == 'chat_default':
-            return self._humanize_response(prompt, results, "")
+            return self._humanize_response(prompt, results, "", skip_semantic=skip_semantic, query_plan=query_plan)
 
         # Guardamos qual padrão foi usado para feedback posterior (Etapa 4)
         self._last_pattern_id = pattern.get('id')
@@ -411,13 +438,21 @@ class LlamaEngine:
             f"Dados: {data_json if results else '[Vazio]'}\n"
         )
 
+        # Se a IA estiver offline, não perdemos tempo tentando
+        if self._is_ia_offline():
+            print("🔌 IA detectada como offline. Pulando preenchimento de template.")
+            return self._format_results(query_plan or {'fields': []}, results, prompt=prompt)
+
         try:
             # Temperatura padrão 0.2
             response = self._call_ai_with_limits(user_prompt, sys_prompt, num_predict=400, temperature=0.2)
+            if not response or len(response.strip()) < 2:
+                print("⚠️ IA retornou vazio ao aplicar padrão. Usando formatação bruta.")
+                return self._format_results(query_plan or {'fields': []}, results, prompt=prompt)
             return response.strip()
         except Exception as e:
             print(f"❌ Erro ao aplicar padrão: {e}")
-            return self._format_results({'fields': []}, results)
+            return self._format_results(query_plan or {'fields': []}, results, prompt=prompt)
 
     # --- ETAPA 4: SISTEMA DE FEEDBACK E EVOLUÇÃO ---
     
@@ -455,40 +490,79 @@ class LlamaEngine:
             self._last_pattern_id = None
 
 
-    def _decide_by_examples(self, prompt: str, results: List[Dict], username: str = None) -> str:
+    def _decide_by_examples(self, prompt: str, results: List[Dict], username: str = None, skip_semantic: bool = False, query_plan: Dict = None) -> str:
         """
         ETAPA 3.2: Função de Decisão por Exemplos.
         Analisa os resultados e decide o comportamento baseado em imitação.
         """
         # 1. Buscar conversas similares bem-sucedidas
-        similar_conversations = self._find_successful_patterns(prompt)
+        similar_conversations = self._find_successful_patterns(prompt, skip_semantic=skip_semantic)
         
         # 2. Analisar contexto atual
         result_count = len(results) if isinstance(results, list) else 0
         
         # 3. Aplicar padrão mais similar
         if result_count > 5:
-            pattern = self._get_pattern('multiple_results')
+            pattern = self._get_pattern('multiple_results', skip_semantic=skip_semantic)
         elif result_count == 1:
-            pattern = self._get_pattern('single_result')
+            pattern = self._get_pattern('single_result', skip_semantic=skip_semantic)
         else:
-            pattern = self._get_pattern('no_results')
+            pattern = self._get_pattern('no_results', skip_semantic=skip_semantic)
             
         # 4. Usar IA apenas para "preencher o template"
-        return self._apply_pattern(pattern, prompt, results)
+        return self._apply_pattern(pattern, prompt, results, skip_semantic=skip_semantic, query_plan=query_plan)
 
-    def discover_relevant_tables(self, prompt, all_tables, top_n=3):
-        """Usa busca vetorial para encontrar apenas as tabelas TREINADAS e relevantes"""
-        try:
-            from ..DATA.storage import DataStorage
-            st = DataStorage()
-            relevant = st.find_similar_tables(prompt, limit=top_n)
+    def discover_relevant_tables(self, prompt, all_tables, top_n=3, skip_semantic: bool = False):
+        """Usa busca vetorial e palavras-chave para encontrar as tabelas mais relevantes"""
+        prompt_upper = prompt.upper()
+        
+        # 1. Busca por Palavras-Chave (Prioridade Máxima)
+        keyword_matches = []
+        for table in all_tables:
+            t_name = table.get('table_name', '').upper()
+            t_desc = table.get('table_description', '').upper()
             
-            if relevant:
-                print(f"Busca Vetorial encontrou {len(relevant)} tabelas treinadas relevantes.")
-                return relevant
-        except Exception as e:
-            print(f"⚠️ Erro na busca vetorial de tabelas: {e}")
+            # Remove prefixos comuns para comparação
+            clean_name = t_name.replace('TB_', '').replace('SYSROH.', '')
+            
+            # Pontuação básica por palavra-chave
+            score = 0
+            if clean_name in prompt_upper: score += 10
+            if t_name in prompt_upper: score += 10
+            
+            # Busca semântica manual simples
+            synonyms = {
+                'CONTATOS': ['CONTATO', 'PESSOA', 'CLIENTE', 'TELEFONE', 'EMAIL', 'QUEM'],
+                'PRODUTOS': ['PRODUTO', 'ITEM', 'ESTOQUE', 'PREÇO'],
+                'VENDAS': ['VENDA', 'PEDIDO', 'FATURAMENTO', 'TOTAL', 'QUANTO']
+            }
+            
+            for key, words in synonyms.items():
+                if key in clean_name:
+                    for word in words:
+                        if word in prompt_upper:
+                            score += 5
+            
+            if score > 0:
+                keyword_matches.append((score, table))
+        
+        if keyword_matches:
+            keyword_matches.sort(key=lambda x: x[0], reverse=True)
+            print(f"Busca por Palavras-Chave encontrou {len(keyword_matches)} tabelas.")
+            return [t for s, t in keyword_matches[:top_n]]
+
+        # 2. Busca Vetorial (Se palavras-chave falharem e não for solicitado pular)
+        if not skip_semantic:
+            try:
+                from ..DATA.storage import DataStorage
+                st = DataStorage()
+                relevant = st.find_similar_tables(prompt, limit=top_n)
+                
+                if relevant:
+                    print(f"Busca Vetorial encontrou {len(relevant)} tabelas treinadas relevantes.")
+                    return relevant
+            except Exception as e:
+                print(f"⚠️ Erro na busca vetorial de tabelas: {e}")
             
         # Fallback: Se vetores falharem ou não houver nada, retorna o que temos
         if not all_tables:
@@ -589,9 +663,29 @@ class LlamaEngine:
             print(f"❌ ERRO JSON CRÍTICO: {e}")
             return None
 
+    _failed_ai_urls = {} # Cache de URLs que falharam (url: timestamp)
+
+    def _is_ia_offline(self) -> bool:
+        """Verifica se todas as URLs de IA conhecidas estão marcadas como falha recente."""
+        import time
+        now = time.time()
+        available_urls = []
+        if self.ai_url_internal: available_urls.append(self.ai_url_internal)
+        if self.ai_url: available_urls.append(self.ai_url)
+        
+        if not available_urls:
+            return True
+            
+        for url in available_urls:
+            last_fail = self._failed_ai_urls.get(url, 0)
+            if now - last_fail > 60: # Se uma URL não falhou nos últimos 60s, não está offline
+                return False
+        return True
+
     def _call_ai_with_limits(self, prompt: str, system_prompt: str, num_predict: int, num_ctx: int = 1024, temperature: float = 0.1, retries: int = 2, stop: List[str] = None) -> str:
         """Chamada direta para a IA com tratamento de erros 500 e failover entre URLs do ambiente."""
         import time
+        now = time.time()
         
         # Stop tokens padrão
         default_stop = ["### Instruction:", "### Response:", "Pergunta do Usuário:", "Resposta do Assistente:"]
@@ -603,15 +697,28 @@ class LlamaEngine:
         if self.ai_url_internal: available_urls.append(self.ai_url_internal)
         if self.ai_url: available_urls.append(self.ai_url)
         
-        if not available_urls:
-            print("❌ ERRO: Nenhuma URL de IA configurada no ambiente (.env)")
+        # Filtrar URLs que falharam recentemente (últimos 5 minutos)
+        valid_urls = []
+        for url in available_urls:
+            last_fail = self._failed_ai_urls.get(url, 0)
+            if now - last_fail > 300: # 5 minutos de cache
+                valid_urls.append(url)
+        
+        if not valid_urls:
+            # Se todas falharam, tenta a externa como última esperança se já passou 30s
+            for url in available_urls:
+                if now - self._failed_ai_urls.get(url, 0) > 30:
+                    valid_urls.append(url)
+        
+        if not valid_urls:
+            print("❌ ERRO: Nenhuma URL de IA disponível ou todas falharam recentemente.")
             return ""
 
         current_num_ctx = num_ctx
         
         for attempt in range(retries):
             # Tenta cada URL disponível
-            for target_url in available_urls:
+            for target_url in valid_urls:
                 try:
                     # Garante o endpoint correto para Ollama
                     if not target_url.endswith('/api/generate') and '/api/' not in target_url:
@@ -654,19 +761,29 @@ class LlamaEngine:
                             }
                         }
 
-                    timeout = 90 # Timeout estendido para 90 segundos
+                    # Timeout agressivo para failover rápido (Reduzido para evitar esperas longas)
+                    timeout = 15 if '192.168' in target_url else 25
                     print(f"Conectando Rohden AI em: {target_url} (Tentativa {attempt+1}/{retries})")
 
                     import urllib3
                     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-                    response = requests.post(
-                        target_url,
-                        json=payload,
-                        headers=self.rohden_headers,
-                        timeout=timeout,
-                        verify=False
-                    )
+                    try:
+                        response = requests.post(
+                            target_url,
+                            json=payload,
+                            headers=self.rohden_headers,
+                            timeout=timeout,
+                            verify=False
+                        )
+                    except requests.exceptions.Timeout:
+                        print(f"⏱️ Timeout de {timeout}s em {target_url}. Marcando como falha temporária.")
+                        self._failed_ai_urls[target_url] = time.time()
+                        continue
+                    except requests.exceptions.ConnectionError as ce:
+                        print(f"🔌 Falha de conexão com {target_url}. Marcando como falha temporária.")
+                        self._failed_ai_urls[target_url] = time.time()
+                        continue
 
                     if response.status_code == 200:
                         res_data = response.json()
@@ -676,7 +793,16 @@ class LlamaEngine:
                             ai_text = res_data.get("response", "").strip()
                         
                         if ai_text:
+                            # Se funcionou, remove do cache de falhas se existir
+                            if target_url in self._failed_ai_urls:
+                                del self._failed_ai_urls[target_url]
                             return ai_text
+                    
+                    elif response.status_code in [502, 503, 504]:
+                        print(f"⚠️ Servidor em manutenção ou sobrecarregado (Status {response.status_code}) em {target_url}")
+                        self._failed_ai_urls[target_url] = time.time()
+                        time.sleep(2) 
+                        continue
                     
                     # Se der 405 ou 404, tenta o endpoint de chat com o payload correto
                     elif response.status_code in [404, 405] and '/api/generate' in target_url:
@@ -694,19 +820,24 @@ class LlamaEngine:
                             "options": payload.get("options", {})
                         }
                         
-                        response = requests.post(alt_url, json=chat_payload, headers=self.rohden_headers, timeout=timeout, verify=False)
-                        if response.status_code == 200:
-                            res_data = response.json()
-                            return res_data.get("message", {}).get("content", "").strip() or res_data.get("response", "").strip()
+                        try:
+                            response = requests.post(alt_url, json=chat_payload, headers=self.rohden_headers, timeout=timeout, verify=False)
+                            if response.status_code == 200:
+                                res_data = response.json()
+                                return res_data.get("message", {}).get("content", "").strip() or res_data.get("response", "").strip()
+                        except:
+                            pass
 
                     print(f"Erro na Rohden AI ({target_url}): Status {response.status_code}")
+                    self._failed_ai_urls[target_url] = time.time()
                     
                 except Exception as e:
                     print(f"Falha na conexão com {target_url}: {str(e)}")
+                    self._failed_ai_urls[target_url] = time.time()
             
             # Se todas as URLs falharam, espera antes do próximo retry
             if attempt < retries - 1:
-                time.sleep(2)
+                time.sleep(1)
 
         return ""
 
@@ -726,7 +857,7 @@ class LlamaEngine:
 
         cache = []
         try:
-            items = storage.get_knowledge(category='QUERY_PLAN_TRAINING', limit=300)
+            items = storage.get_knowledge(category='QUERY_PLAN_TRAINING', limit=1000)
             for item in items:
                 try:
                     payload = json.loads(item.get('content') or '{}')
@@ -775,12 +906,24 @@ class LlamaEngine:
                 best_plan = item.get('plan')
 
         # Para perguntas muito curtas (menos de 4 caracteres), exige match exato (score 1.0)
+        # No modo agente, somos mais flexíveis com o score de treinamento (0.75 vs 0.88)
         min_score = 1.0 if len(normalized) < 4 else 0.88
         
+        # Tenta uma segunda chance se o score for baixo mas estivermos no modo agente
+        if best_score < min_score and best_score >= 0.7:
+            # Se for modo agente e houver palavras-chave fortes, aceitamos score menor
+            data_keywords = {'quantos', 'total', 'contatos', 'vendas', 'produtos', 'quem'}
+            if q_words.intersection(data_keywords):
+                print(f"🎯 Score {best_score:.2f} aceito para treinamento no Modo Agente por palavras-chave.")
+                min_score = 0.7
+
         if best_score >= min_score and isinstance(best_plan, dict):
+            print(f"✅ Plano treinado encontrado (Score: {best_score:.2f}): '{normalized}'")
             self._plan_cache[normalized] = best_plan
             return best_plan
-
+        elif best_score > 0.4:
+            print(f"⚠️ Plano treinado com score insuficiente ({best_score:.2f}): '{normalized}' (Mínimo: {min_score})")
+        
         return None
 
     def _validate_query_plan(self, plan: Dict[str, Any], tables: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -792,10 +935,15 @@ class LlamaEngine:
         if not plan:
             return None, "ERR_PLAN_EMPTY"
         
-        plan_type = str(plan.get('type', '')).upper()
+        plan_type = str(plan.get('type') or plan.get('action') or 'SELECT').upper()
         if plan_type == 'NONE':
             return None, "ERR_PLAN_NONE"
         
+        # Se o tipo for DATA_ANALYSIS (comum em planos da IA), tratamos como SELECT
+        if plan_type == 'DATA_ANALYSIS':
+            plan_type = 'SELECT'
+            plan['type'] = 'SELECT'
+
         # Suporte a SQL bruto injetado pelo fallback do extrator
         if plan_type == 'RAW_SQL':
             sql = plan.get('sql', '').upper()
@@ -812,6 +960,7 @@ class LlamaEngine:
 
         table_map = {}
         for table in tables:
+            t_name = table.get('table_name', '')
             schema_info = table.get('schema_info') or {}
             if isinstance(schema_info, str):
                 try:
@@ -820,31 +969,55 @@ class LlamaEngine:
                     schema_info = {}
             schema = schema_info.get('schema', 'SYSROH')
             columns = [col.get('name') for col in table.get('columns_info', []) if col.get('name')]
-            table_map[table.get('table_name')] = {
+            
+            # Mapeamento normalizado (Maiúsculo e sem prefixo de schema)
+            table_map[t_name.upper()] = {
+                'original_name': t_name,
                 'schema': schema,
                 'columns': columns
             }
+            # Também mapeia sem o prefixo SYSROH. se houver
+            if '.' in t_name:
+                short_name = t_name.split('.')[-1].upper()
+                table_map[short_name] = table_map[t_name.upper()]
 
-        table_name = plan.get('table')
-        if table_name not in table_map:
-            return None, f"ERR_TABLE_NOT_AUTHORIZED:{table_name}"
+        plan_table = str(plan.get('table') or plan.get('target_table') or '').upper()
+        if not plan_table:
+            return None, "ERR_PLAN_NO_TABLE"
 
-        schema = plan.get('schema') or table_map[table_name]['schema']
+        # Busca flexível da tabela
+        target_info = table_map.get(plan_table)
+        if not target_info:
+            # Tenta buscar por substring se for modo flexível
+            for t_key in table_map:
+                if t_key in plan_table or plan_table in t_key:
+                    target_info = table_map[t_key]
+                    plan['table'] = target_info['original_name']
+                    break
+        
+        if not target_info:
+            print(f"❌ Tabela '{plan_table}' não encontrada no catálogo. Disponíveis: {list(table_map.keys())[:5]}...")
+            return None, f"ERR_TABLE_NOT_AUTHORIZED:{plan_table}"
+
+        table_name = target_info['original_name']
+        plan['table'] = table_name
+        schema = plan.get('schema') or target_info['schema']
         plan['schema'] = schema
 
-        allowed_columns = table_map[table_name]['columns']
+        allowed_columns = target_info['columns']
         column_map = {c.upper(): c for c in allowed_columns}
 
         fields = plan.get('fields') or []
+        # Se for contagem, aceitamos COUNT(*) mesmo que não esteja nas colunas
         if fields:
             sanitized = []
             for field in fields:
-                if field == '*':
-                    sanitized.append('*')
+                field_str = str(field).upper()
+                if field_str == '*' or 'COUNT(' in field_str or 'SUM(' in field_str:
+                    sanitized.append(field)
                     continue
-                key = str(field).upper()
-                if key in column_map:
-                    sanitized.append(column_map[key])
+                if field_str in column_map:
+                    sanitized.append(column_map[field_str])
             plan['fields'] = sanitized
 
         filters = plan.get('filters') or []
@@ -910,7 +1083,7 @@ class LlamaEngine:
         """Retorna apenas o contexto de comportamento (imitação) sem instruções fixas."""
         return self.behavior_manager.format_patterns_for_prompt(user_query)
 
-    def generate_response(self, prompt, username=None, history=None):
+    def generate_response(self, prompt, username=None, history=None, mode='chat'):
         """
         Gera uma resposta baseada na arquitetura contextual:
         1. IA Principal classifica e decide (CHAT ou DATA_ANALYSIS)
@@ -961,7 +1134,8 @@ class LlamaEngine:
         metadata = {
             'tabelas_usadas': [],
             'intencao': None,
-            'user_memory_active': bool(user_memory)
+            'user_memory_active': bool(user_memory),
+            'mode': mode
         }
 
         try:
@@ -969,10 +1143,22 @@ class LlamaEngine:
             from ..DATA import storage
             config_tables = storage.load_tables()
             
-            # 2. ANÁLISE E DECISÃO PELA IA (Unificada)
-            # ETAPA 3.1: O comportamento é guiado por análise e exemplos
-            full_context_prompt = f"{user_memory}\n\nPergunta do Usuário: {prompt}" if user_memory else prompt
-            ai_analysis = self._unified_ai_analysis(full_context_prompt, config_tables, history=processed_history, username=username)
+            # 2. VERIFICAÇÃO DE TREINAMENTO PRÉVIO (Prioridade no modo Agente)
+            trained_plan = self._find_trained_plan(prompt)
+            
+            # Se houver um plano treinado e estivermos no modo agente, usamos imediatamente
+            if mode == 'agente' and trained_plan:
+                print(f"🎯 Usando plano treinado (Modo Agente): '{prompt}'")
+                ai_analysis = {
+                    'action': 'DATA_ANALYSIS',
+                    'plan': trained_plan,
+                    'confidence': 1.0
+                }
+            else:
+                # 3. ANÁLISE E DECISÃO PELA IA (Unificada)
+                # ETAPA 3.1: O comportamento é guiado por análise e exemplos
+                full_context_prompt = f"{user_memory}\n\nPergunta do Usuário: {prompt}" if user_memory else prompt
+                ai_analysis = self._unified_ai_analysis(full_context_prompt, config_tables, history=processed_history, username=username, mode=mode)
             
             action = None
             chat_text = None
@@ -980,30 +1166,65 @@ class LlamaEngine:
             
             if ai_analysis and isinstance(ai_analysis, dict):
                 action = ai_analysis.get('action', '').upper()
+                
+                # Respeitar o modo selecionado pelo usuário
+                if mode == 'chat':
+                    # No modo chat, só fazemos DATA_ANALYSIS se a IA estiver MUITO segura ou se for uma pergunta óbvia de dados
+                    # Caso contrário, mantemos CHAT
+                    if action == 'DATA_ANALYSIS' and ai_analysis.get('confidence', 1.0) < 0.8:
+                        action = 'CHAT'
+                        chat_text = "Como posso ajudar você hoje?"
+                elif mode == 'agente':
+                    # No modo agente, forçamos a busca de dados.
+                    # Se houver plano treinado, ele já foi definido acima.
+                    # Se não, e a IA disse CHAT, tentamos forçar DATA_ANALYSIS a menos que seja saudação.
+                    if action == 'CHAT':
+                        prompt_lower = prompt.lower()
+                        greetings = ["oi", "olá", "bom dia", "boa tarde", "boa noite", "quem é você", "o que você faz"]
+                        if any(g in prompt_lower for g in greetings):
+                            chat_text = "Olá! Sou o Samuca. Estou no modo **Agente da Empresa**, pronto para consultar dados no banco para você. Como posso ajudar com informações da Rohden hoje?"
+                        else:
+                            # Tenta forçar DATA_ANALYSIS para qualquer outra coisa que não seja saudação
+                            action = 'DATA_ANALYSIS'
+                
                 if action == 'CHAT':
-                    chat_text = ai_analysis.get('text')
+                    if not chat_text:
+                        chat_text = ai_analysis.get('text')
                 elif action == 'DATA_ANALYSIS' or action == 'QUERY':
                     action = 'DATA_ANALYSIS'
                     metadata['intencao'] = 'DATA_ANALYSIS'
-                    query_plan = ai_analysis.get('plan')
+                    # O plano pode estar na chave 'plan' ou ser a própria análise
+                    query_plan = ai_analysis.get('plan') or (ai_analysis if 'sql' in ai_analysis else None)
+                    if not query_plan and mode == 'agente':
+                        query_plan = trained_plan
 
-            # 3. FALLBACK PARA TREINAMENTO ESPECÍFICO (Se a IA for incerta sobre o plano de dados)
+            # 4. FALLBACK PARA TREINAMENTO ESPECÍFICO (Para modo chat ou se o plano da IA falhou)
             if not action or (action == 'DATA_ANALYSIS' and not query_plan):
-                trained_plan = self._find_trained_plan(prompt)
+                if not trained_plan: # Se ainda não buscamos
+                    trained_plan = self._find_trained_plan(prompt)
+                
                 if trained_plan:
                     query_plan = trained_plan
                     action = 'DATA_ANALYSIS'
                     metadata['intencao'] = 'DATA_ANALYSIS'
                 elif not action:
-                    action = 'CHAT' # Default para chat se nada for decidido, mas o texto virá da IA
+                    action = 'CHAT'
+                elif action == 'DATA_ANALYSIS' and mode == 'agente':
+                    # Se estamos no modo agente e não conseguimos um plano de dados
+                    return {'text': "Desculpe, como estou no modo **Agente da Empresa**, só posso responder perguntas relacionadas a dados do banco. Não consegui identificar quais dados você deseja consultar. Pode ser mais específico?", 'metadata': metadata}
 
-            # 4. EXECUÇÃO DA AÇÃO DECIDIDA
+            # 5. EXECUÇÃO DA AÇÃO DECIDIDA
+            if mode == 'agente':
+                print(f"🕵️ Agente Decision - Action: {action}, Has Plan: {query_plan is not None}")
+            
+            # Definir se devemos pular embeddings (Modo Agente ou servidor instável)
+            skip_emb = (mode == 'agente')
             
             # FLUXO: CHAT
             if action == 'CHAT':
                 # ETAPA 3: Decisão de resposta por imitação (mesmo para chat sem dados)
                 if not chat_text:
-                    chat_text = self._decide_by_examples(prompt, [], username)
+                    chat_text = self._decide_by_examples(prompt, [], username, skip_semantic=skip_emb)
                 return {'text': chat_text, 'metadata': metadata}
             
             # FLUXO: DATA_ANALYSIS
@@ -1012,8 +1233,11 @@ class LlamaEngine:
                 validated_plan, plan_error = self._validate_query_plan(query_plan, config_tables)
 
                 if not validated_plan:
+                    print(f"❌ Falha na validação do plano (Modo {mode}): {plan_error}")
                     # Se o plano falhou, usamos o humanizer padrão que agora é guiado por padrões
-                    fallback_text = self._decide_by_examples(prompt, [], username)
+                    if mode == 'agente':
+                        return {'text': "Não consegui formular uma consulta válida para os dados da empresa. Por favor, tente perguntar de outra forma (ex: 'contato de fulano' ou 'pedidos de hoje').", 'metadata': metadata}
+                    fallback_text = self._decide_by_examples(prompt, [], username, skip_semantic=skip_emb)
                     return {'text': fallback_text, 'metadata': metadata}
 
                 # Execução SQL
@@ -1029,7 +1253,7 @@ class LlamaEngine:
                         sql_query, params, dialect = SQLBuilder.from_plan(validated_plan).build()
                 except Exception as build_err:
                     print(f"Erro ao montar SQL: {str(build_err)}")
-                    fallback_text = self._decide_by_examples(prompt, [], username)
+                    fallback_text = self._decide_by_examples(prompt, [], username, skip_semantic=skip_emb, query_plan=validated_plan)
                     return {'text': fallback_text, 'metadata': metadata}
 
                 # Persiste para treinamento futuro
@@ -1059,7 +1283,7 @@ class LlamaEngine:
                 if isinstance(sql_result, str):
                     # Se sql_result for string, provavelmente é uma mensagem de erro do banco
                     # Usamos o humanizer padrão que agora é guiado por padrões
-                    response = self._decide_by_examples(prompt, [], username)
+                    response = self._decide_by_examples(prompt, [], username, skip_semantic=skip_emb, query_plan=validated_plan)
                 else:
                     # NOVA LÓGICA: Verifica se há excesso de resultados antes de humanizar normalmente
                     try:
@@ -1071,7 +1295,9 @@ class LlamaEngine:
                         print(f"⚠️ Erro ao processar refinamento de resultados: {e}")
 
                     # ETAPA 3: Decisão por Exemplos (Imitação de Comportamento)
-                    response = self._decide_by_examples(prompt, sql_result, username)
+                    # Se for modo agente e usamos um plano treinado, pulamos a busca semântica de padrões para evitar travamentos
+                    skip_emb = (mode == 'agente' and trained_plan is not None)
+                    response = self._decide_by_examples(prompt, sql_result, username, skip_semantic=skip_emb, query_plan=validated_plan)
 
                 # Aprendizado Automático
                 if username and prompt:
@@ -1080,7 +1306,7 @@ class LlamaEngine:
                 return {'text': response, 'metadata': metadata}
 
             # Última instância: se chegar aqui sem ação (raro), usa o comportamento de imitação
-            final_fallback = self._decide_by_examples(prompt, [], username)
+            final_fallback = self._decide_by_examples(prompt, [], username, skip_semantic=skip_emb, query_plan=query_plan)
             return {'text': final_fallback, 'metadata': metadata}
 
         except Exception as e:
@@ -1121,7 +1347,7 @@ class LlamaEngine:
         
         return examples
 
-    def _unified_ai_analysis(self, prompt: str, tables: List[Dict[str, Any]], history: List[Dict[str, Any]] = None, username: str = None) -> Optional[Dict[str, Any]]:
+    def _unified_ai_analysis(self, prompt: str, tables: List[Dict[str, Any]], history: List[Dict[str, Any]] = None, username: str = None, mode: str = 'chat') -> Optional[Dict[str, Any]]:
         """
         FLUXO UNIFICADO: A IA decide se é CHAT ou DATA_ANALYSIS.
         Toda a decisão de fluxo é feita pela IA.
@@ -1149,12 +1375,65 @@ class LlamaEngine:
             history_context += "### FIM DO CONTEXTO ###\n"
 
         # 4. CONTEXTO DE DECISÃO (Apenas Exemplos e Capacidades)
-        decision_context = f"Tópicos: {topics_str}\n"
+        if mode == 'agente':
+            system_decision_prompt = """Você é o Agente Especialista da Rohden. 
+Sua única função é extrair dados do banco da empresa para ajudar o usuário.
+
+REGRAS RÍGIDAS PARA MODO AGENTE:
+1. Se o usuário fizer uma pergunta sobre dados (quem, quantos, qual, total, lista, contato, empresa, data, status), use SEMPRE "DATA_ANALYSIS".
+2. Se o usuário perguntar "quantos", "total" ou "quantidade", use SEMPRE "DATA_ANALYSIS".
+3. Você NÃO deve fazer conversas informais. Se o usuário apenas saudar (oi, olá), responda com CHAT mas mantendo o foco em dados.
+4. Se a pergunta NÃO for sobre dados da empresa e NÃO for uma saudação, use CHAT e informe que você só pode responder sobre dados da empresa.
+5. Responda APENAS em JSON puro.
+
+FORMATO ESPERADO:
+{
+  "action": "DATA_ANALYSIS",
+  "target_table": "NOME_DA_TABELA_MAIS_PROVAVEL",
+  "reason": "O usuário deseja saber a quantidade total de contatos."
+}
+OU
+{
+  "action": "CHAT",
+  "text": "Olá! Sou o Agente de Dados. Em que posso ajudar você com as informações da empresa hoje?"
+}
+"""
+        else:
+            system_decision_prompt = """Você é o Samuca, o cérebro da Rohden. 
+Sua tarefa é decidir se a mensagem do usuário é uma saudação/conversa (CHAT) ou uma busca de dados (DATA_ANALYSIS).
+
+REGRAS CRÍTICAS:
+1. Se o usuário perguntar por NOMES de pessoas, empresas, DATAS, STATUS ou qualquer informação que pareça estar em um banco de dados, você DEVE usar "DATA_ANALYSIS".
+2. Se o usuário perguntar por QUANTIDADES, totais, contagens ou estatísticas (ex: "quantos contatos", "total de vendas", "qual a média"), você DEVE usar "DATA_ANALYSIS".
+3. Se o usuário apenas cumprimentar (oi, bom dia) ou fizer uma pergunta genérica sobre quem você é, use "CHAT".
+4. Responda APENAS em JSON puro. Não explique fora do JSON.
+
+FORMATO ESPERADO:
+{
+  "action": "DATA_ANALYSIS",
+  "target_table": "NOME_DA_TABELA_MAIS_PROVAVEL",
+  "reason": "O usuário está buscando o contato de uma pessoa específica."
+}
+OU
+{
+  "action": "CHAT",
+  "text": "Olá! Como posso ajudar você hoje?"
+}
+"""
+        decision_context = f"{system_decision_prompt}\n\n### TABELAS DISPONÍVEIS (CAPACIDADES) ###\n{topics_str}\n"
         
         # Injeção de Exemplos de Decisão (Busca Ambígua, Direta, etc)
-        decision_examples = self.behavior_manager.format_patterns_for_prompt()
+        # No modo agente, pulamos busca semântica para evitar travamentos
+        decision_examples = self.behavior_manager.format_patterns_for_prompt(prompt, skip_semantic=(mode == 'agente'))
         if decision_examples:
-            decision_context += "\nExemplos:\n" + decision_examples
+            decision_context += "\n### EXEMPLOS DE COMPORTAMENTO ###\n" + decision_examples
+
+        # Se a IA estiver offline, não perdemos tempo tentando a decisão
+        if self._is_ia_offline():
+            print("🔌 IA detectada como offline na fase de decisão.")
+            if mode == 'agente':
+                return {"action": "DATA_ANALYSIS", "reason": "IA offline, forçando busca por plano treinado no modo agente."}
+            return {"action": "CHAT", "text": "Olá! Estou operando em modo limitado no momento porque meu cérebro principal (IA) está offline. Posso ter dificuldades em entender perguntas complexas, mas ainda posso tentar ajudar com comandos básicos."}
 
         try:
             # Chamada de Decisão
@@ -1180,6 +1459,14 @@ class LlamaEngine:
             
             action = decision.get('action', 'CHAT').upper()
             
+            # REFORÇO MODO AGENTE: Se for pergunta de dados mas a IA disse CHAT, força DATA_ANALYSIS
+            if mode == 'agente' and action == 'CHAT':
+                data_keywords = ['QUANTOS', 'QUEM', 'TOTAL', 'LISTA', 'CONTATO', 'EMPRESA', 'PRODUTO', 'VENDA', 'QUAL']
+                prompt_upper = prompt.upper()
+                if any(kw in prompt_upper for kw in data_keywords):
+                    print(f"🔄 Forçando DATA_ANALYSIS no Modo Agente por palavra-chave: '{prompt}'")
+                    action = 'DATA_ANALYSIS'
+            
             if action == 'CHAT':
                 return decision
 
@@ -1199,13 +1486,13 @@ class LlamaEngine:
                     target_table = relevant[0]
 
                 # Agora sim fazemos o "heavy lifting" apenas para a tabela selecionada
-                return self._generate_data_plan(prompt, target_table, history, username)
+                return self._generate_data_plan(prompt, target_table, history, username, mode=mode)
 
         except Exception as e:
             print(f"❌ ERRO na análise unificada: {e}")
             return None
 
-    def _generate_data_plan(self, prompt: str, table: Dict[str, Any], history: List[Dict[str, Any]], username: str) -> Optional[Dict[str, Any]]:
+    def _generate_data_plan(self, prompt: str, table: Dict[str, Any], history: List[Dict[str, Any]], username: str, mode: str = 'chat') -> Optional[Dict[str, Any]]:
         """Gera o plano técnico de SQL baseado no treinamento e catálogo da tabela."""
         table_copy = table.copy()
         all_cols = table_copy.get('columns_info', [])
@@ -1243,16 +1530,88 @@ class LlamaEngine:
             for _, item in matches[:3]:
                 trained_examples += f"Pergunta: {item.get('q')}\nPlano: {json.dumps(item.get('plan'))}\n"
 
-        # Contexto de Geração (Apenas Exemplos e Catálogo)
+        # 3. Contexto de Geração (Instruções, Catálogo e Histórico)
+        if mode == 'agente':
+            system_plan_prompt = """Você é o arquiteto de SQL ESPECIALISTA da Rohden. 
+Sua missão é transformar perguntas naturais em consultas SQL precisas, PRIORIZANDO os padrões dos EXEMPLOS DE REFERÊNCIA.
+
+REGRAS CRÍTICAS (MODO AGENTE):
+1. Siga RIGOROSAMENTE o estilo dos EXEMPLOS DE REFERÊNCIA abaixo.
+2. Se o usuário perguntar por um NOME ou DESCRIÇÃO, use a cláusula WHERE UPPER(coluna) LIKE '%VALOR_EM_MAIUSCULO%'.
+3. Se a pergunta for sobre "contato", procure por colunas como NOME, EMAIL, TELEFONE ou similar.
+4. Se o usuário perguntar "quantos", "total" ou "quantidade", gere um SQL com SELECT COUNT(*) ou similar.
+5. Retorne APENAS o JSON. Não escreva explicações fora do JSON.
+6. Limite o resultado a 5 linhas se não houver um filtro específico e não for uma contagem.
+
+FORMATO JSON OBRIGATÓRIO:
+{
+  "action": "DATA_ANALYSIS",
+  "target_table": "NOME_DA_TABELA",
+  "sql": "SELECT ... FROM ... WHERE ...",
+  "reason": "Explicação curta do que está sendo buscado."
+}
+"""
+        else:
+            system_plan_prompt = """Você é o arquiteto de SQL da Rohden. Sua missão é transformar perguntas naturais em consultas SQL precisas.
+
+REGRAS CRÍTICAS:
+1. Retorne APENAS o JSON. Não escreva explicações fora do JSON.
+2. Se o usuário perguntar por um NOME ou DESCRIÇÃO, use a cláusula WHERE UPPER(coluna) LIKE '%VALOR_EM_MAIUSCULO%'.
+3. Se a pergunta for sobre "contato", procure por colunas como NOME, EMAIL, TELEFONE ou similar.
+4. Se o usuário perguntar "quantos", "total" ou "quantidade", gere um SQL com SELECT COUNT(*) ou similar.
+5. Nunca diga que não pode fazer a busca por falta de ID. Use o que o usuário forneceu (nomes, partes de nomes).
+6. Limite o resultado a 5 linhas se não houver um filtro específico e não for uma contagem.
+
+FORMATO JSON OBRIGATÓRIO:
+{
+  "action": "DATA_ANALYSIS",
+  "target_table": "NOME_DA_TABELA",
+  "sql": "SELECT ... FROM ... WHERE ...",
+  "reason": "Explicação curta do que está sendo buscado."
+}
+"""
         plan_context = (
-            f"Catálogo: {json.dumps(catalog, ensure_ascii=False)}\n"
+            f"{system_plan_prompt}\n\n"
+            f"### CATÁLOGO DA TABELA ###\n{json.dumps(catalog, ensure_ascii=False)}\n\n"
             f"{history_context}\n"
-            f"Exemplos:\n{trained_examples}"
+            f"### EXEMPLOS DE REFERÊNCIA ###\n{trained_examples}"
         )
         
         response = self._call_ai_with_limits(prompt, plan_context, num_predict=500, num_ctx=2048, temperature=0.0)
-        print(f"🔍 PLANO DE DADOS GERADO: '{response}'")
-        return self._extract_json(response)
+        print(f"🔍 PLANO DE DADOS GERADO ({mode}): '{response}'")
+        
+        plan = self._extract_json(response)
+        
+        # Fallback de emergência para Modo Agente (Se a IA falhar em gerar JSON ou SQL)
+        if mode == 'agente' and (not plan or not plan.get('sql')):
+            t_name = table.get('table_name')
+            prompt_lower = prompt.lower()
+            
+            # Se a IA retornou algo que não é JSON, mas parece ser SQL
+            if not plan and "SELECT" in response.upper():
+                import re
+                sql_match = re.search(r'SELECT.*', response.replace('\n', ' '), re.IGNORECASE)
+                if sql_match:
+                    return {
+                        "action": "DATA_ANALYSIS",
+                        "target_table": t_name,
+                        "sql": sql_match.group(0).strip(),
+                        "reason": "SQL extraído de resposta não-JSON."
+                    }
+
+            # Fallback absoluto baseado em palavras-chave
+            sql_fallback = f"SELECT * FROM {t_name} FETCH FIRST 5 ROWS ONLY"
+            if any(w in prompt_lower for w in ['quantos', 'total', 'quantidade', 'soma']):
+                sql_fallback = f"SELECT COUNT(*) as TOTAL FROM {t_name}"
+            
+            return {
+                "action": "DATA_ANALYSIS",
+                "target_table": t_name,
+                "sql": sql_fallback,
+                "reason": "Fallback de emergência para modo Agente."
+            }
+
+        return plan
 
     def perform_advanced_training(self, table_name, columns, samples):
         """Realiza o treinamento semântico avançado de uma tabela (Apenas dados, sem instruções)"""

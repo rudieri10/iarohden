@@ -47,13 +47,13 @@ class BehaviorManager:
         """Busca padrões similares usando a nova busca vetorial do ChromaDB (Ultra Rápido)"""
         return self.storage.find_similar_patterns(user_input, limit=limit)
 
-    def format_patterns_for_prompt(self, user_input: Optional[str] = None) -> str:
+    def format_patterns_for_prompt(self, user_input: Optional[str] = None, skip_semantic: bool = False) -> str:
         """Formata os padrões em uma string legível. Se user_input for fornecido, busca similares."""
-        if user_input:
-            patterns = self.find_similar_patterns(user_input)
+        if user_input and not skip_semantic:
+            patterns = self.find_similar_patterns(user_input, limit=5)
             header = "\n### VEJA COMO VOCÊ RESPONDEU SITUAÇÕES SIMILARES (APRENDA POR IMITAÇÃO):\n"
         else:
-            patterns = self.get_all_patterns()[:5] # Fallback para os primeiros 5
+            patterns = self.get_all_patterns(limit=5)
             header = "\n### EXEMPLOS DE COMPORTAMENTO ESPERADO:\n"
         
         if not patterns:
@@ -61,8 +61,14 @@ class BehaviorManager:
             
         formatted = header
         for p in patterns:
-            formatted += f"\nUsuário: {p['user_input']}\n"
+            # Pular padrões que parecem ser sugestões de treinamento automáticas (focadas em tabelas)
+            # se o input do usuário for algo genérico como "oi"
+            if user_input and len(user_input) < 5 and p.get('situation') == 'SAMUCA_AI_AUTONOMOUS':
+                continue
+
+            formatted += f"\nSituação: {p.get('situation', 'Conversa')}\n"
+            formatted += f"Usuário: {p['user_input']}\n"
             formatted += f"Você: {p['ai_response']}\n"
             
-        formatted += "\nAgora responda de forma similar, mantendo o tom e a estrutura dos exemplos acima.\n"
+        formatted += "\nLembre-se: Responda apenas ao que foi perguntado, de forma natural.\n"
         return formatted

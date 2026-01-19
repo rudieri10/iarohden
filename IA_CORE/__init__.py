@@ -20,6 +20,7 @@ from .DATA import (
     get_knowledge, save_knowledge,
     export_config, import_config
 )
+from .TRAINING import TableTrainer, SyntheticPatternGenerator
 
 __all__ = [
     'MemoriaConversacional', 'memoria_system', 
@@ -34,5 +35,6 @@ __all__ = [
     'get_config', 'save_config', 'load_tables', 'save_tables',
     'get_table_metadata', 'save_table_metadata',
     'get_knowledge', 'save_knowledge',
-    'export_config', 'import_config'
+    'export_config', 'import_config',
+    'TableTrainer', 'SyntheticPatternGenerator'
 ]

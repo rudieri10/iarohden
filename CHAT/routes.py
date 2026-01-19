@@ -68,6 +68,7 @@ def ask():
         user_message = data.get('prompt') or data.get('message')
         chat_id = data.get('chat_id')
         history = data.get('history', [])
+        mode = data.get('mode', 'chat') # Novo parâmetro
         username = session.get('user_name') or session.get('usuario')
         
         if not user_message:
@@ -83,7 +84,7 @@ def ask():
                 history = db_history
             
         engine = get_llama_engine()
-        result = engine.generate_response(user_message, username=username, history=history)
+        result = engine.generate_response(user_message, username=username, history=history, mode=mode)
         response_text = result.get('text', '')
         metadata = result.get('metadata', {})
         

@@ -79,7 +79,8 @@ class LLMPatternGenerator:
         }
 
         try:
-            response = requests.post(self.api_url, headers=headers, json=payload, timeout=40)
+            # Timeout reduzido para evitar esperas longas se o Groq estiver lento/fora
+            response = requests.post(self.api_url, headers=headers, json=payload, timeout=25)
             response.raise_for_status()
             
             result = response.json()
