@@ -172,13 +172,13 @@ class DataStorage:
     def load_tables(self, limit: int = None) -> List[Dict]:
         """Carrega metadados das tabelas do ChromaDB"""
         collection = self._get_collection("table_metadata")
-        results = collection.get()
+        results = collection.get(include=['metadatas', 'embeddings'])
         
         tables = []
         for i in range(len(results['ids'])):
             metadata = results['metadatas'][i]
             # ChromaDB não suporta tipos complexos em metadados, então decodificamos strings JSON
-            tables.append({
+            table_data = {
                 'id': results['ids'][i],
                 'table_name': metadata.get('table_name'),
                 'table_description': metadata.get('table_description'),
@@ -189,8 +189,22 @@ class DataStorage:
                 'is_active': metadata.get('is_active', 1),
                 'deep_profile': json.loads(metadata.get('deep_profile', '{}')),
                 'semantic_context': json.loads(metadata.get('semantic_context', '[]')),
-                'export_status': metadata.get('export_status', 'Sucesso')
-            })
+                'validated_rules': json.loads(metadata.get('validated_rules', '[]')),
+                'export_status': metadata.get('export_status', 'Sucesso'),
+                'updated_at': metadata.get('updated_at'),
+                'has_vector': False
+            }
+            
+            # Verificar se possui embedding
+            if results.get('embeddings') is not None and i < len(results['embeddings']) and results['embeddings'][i] is not None:
+                # Se o primeiro elemento for 0.0, pode ser o fallback de erro, mas ainda conta como "ter vetor" para o Chroma
+                # Aqui vamos considerar que tem vetor se a lista não estiver vazia
+                try:
+                    table_data['has_vector'] = len(results['embeddings'][i]) > 0
+                except (TypeError, ValueError):
+                    table_data['has_vector'] = False
+                
+            tables.append(table_data)
             
         if limit:
             return tables[:limit]
@@ -240,7 +254,9 @@ class DataStorage:
             'is_active': 1 if metadata.get('is_active', True) else 0,
             'deep_profile': json.dumps(metadata.get('deep_profile', {})),
             'semantic_context': json.dumps(metadata.get('semantic_context', [])),
-            'export_status': metadata.get('export_status', 'Sucesso')
+            'validated_rules': json.dumps(metadata.get('validated_rules', [])),
+            'export_status': metadata.get('export_status', 'Sucesso'),
+            'updated_at': datetime.now().isoformat()
         }
         
         # Usar embedding se fornecido, senão o Chroma gera um básico
@@ -263,11 +279,11 @@ class DataStorage:
     def get_table_metadata(self, table_name: str) -> Optional[Dict]:
         """Recupera metadados de uma tabela específica do ChromaDB"""
         collection = self._get_collection("table_metadata")
-        result = collection.get(ids=[table_name])
+        result = collection.get(ids=[table_name], include=['metadatas', 'embeddings'])
         if result['metadatas']:
             meta = result['metadatas'][0]
             # Decodificar campos JSON
-            return {
+            table_data = {
                 'table_name': meta.get('table_name'),
                 'table_description': meta.get('table_description'),
                 'schema_info': json.loads(meta.get('schema_info', '{}')),
@@ -277,8 +293,19 @@ class DataStorage:
                 'is_active': meta.get('is_active', 1),
                 'deep_profile': json.loads(meta.get('deep_profile', '{}')),
                 'semantic_context': json.loads(meta.get('semantic_context', '[]')),
-                'export_status': meta.get('export_status', 'Sucesso')
+                'validated_rules': json.loads(meta.get('validated_rules', '[]')),
+                'export_status': meta.get('export_status', 'Sucesso'),
+                'updated_at': meta.get('updated_at'),
+                'has_vector': False
             }
+            
+            if result.get('embeddings') is not None and len(result['embeddings']) > 0 and result['embeddings'][0] is not None:
+                try:
+                    table_data['has_vector'] = len(result['embeddings'][0]) > 0
+                except (TypeError, ValueError):
+                    table_data['has_vector'] = False
+                
+            return table_data
         return None
 
     def get_patterns_count(self) -> int:
@@ -530,25 +557,8 @@ def save_tables(tables: List[Dict]):
     return _get_storage().save_tables(tables)
 
 def get_table_metadata(table_name: str) -> Optional[Dict]:
-    # ChromaDB get retorna uma lista, pegamos o primeiro se existir
-    collection = _get_storage()._get_collection("table_metadata")
-    result = collection.get(ids=[table_name])
-    if result['metadatas']:
-        meta = result['metadatas'][0]
-        # Decodificar campos JSON
-        return {
-            'table_name': meta.get('table_name'),
-            'table_description': meta.get('table_description'),
-            'schema_info': json.loads(meta.get('schema_info', '{}')),
-            'columns_info': json.loads(meta.get('columns_info', '[]')),
-            'sample_data': json.loads(meta.get('sample_data', '[]')),
-            'record_count': meta.get('record_count', 0),
-            'is_active': meta.get('is_active', 1),
-            'deep_profile': json.loads(meta.get('deep_profile', '{}')),
-            'semantic_context': json.loads(meta.get('semantic_context', '[]')),
-            'export_status': meta.get('export_status', 'Sucesso')
-        }
-    return None
+    """Função de compatibilidade para recuperar metadados"""
+    return _get_storage().get_table_metadata(table_name)
 
 def save_table_metadata(table_name: str, metadata: Dict):
     return _get_storage().save_table_metadata(table_name, metadata)
