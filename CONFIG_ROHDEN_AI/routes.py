@@ -290,8 +290,10 @@ def get_current_config():
                 'description': t_db.get('table_description', ''),
                 'record_count': t_db.get('record_count', 0),
                 'updated_at': t_db.get('updated_at'),
-                'has_vector': t_db.get('embedding_vector') is not None and len(t_db.get('embedding_vector', b'')) > 0,
+                'has_vector': t_db.get('has_vector', False),
                 'export_status': t_db.get('export_status', 'Sucesso'),
+                'validated_rules': t_db.get('validated_rules', []),
+                'deep_profile': t_db.get('deep_profile', {}),
                 'processed': {
                     'last_processed': t_db.get('updated_at'),
                     'count': t_db.get('record_count', 0)
@@ -334,6 +336,10 @@ def clean_for_json(obj):
     if obj is None:
         return None
         
+    # Verificar se é um array do NumPy sem importar o numpy (evita erro de verdade ambígua)
+    if type(obj).__name__ == 'ndarray':
+        return obj.tolist()
+        
     # Se for um LOB do Oracle que ainda não foi lido
     if hasattr(obj, 'read'):
         try:
@@ -344,11 +350,11 @@ def clean_for_json(obj):
     if isinstance(obj, dict):
         # OTIMIZAÇÃO: Remove vetores de embedding que são pesados e não usados no frontend
         return {
-            k: clean_for_json(v) 
+            str(k): clean_for_json(v) 
             for k, v in obj.items() 
-            if k.lower() not in ('embedding_vector', 'vector')
+            if str(k).lower() not in ('embedding_vector', 'vector')
         }
-    elif isinstance(obj, list):
+    elif isinstance(obj, (list, tuple)):
         return [clean_for_json(i) for i in obj]
     elif isinstance(obj, bytes):
         # Se for bytes, só tenta decodificar se for pequeno (provavelmente texto)
@@ -362,7 +368,12 @@ def clean_for_json(obj):
         return obj.isoformat()
     elif isinstance(obj, (int, float, str, bool)):
         return obj
-    return str(obj)
+    
+    # Fallback para qualquer outro objeto
+    try:
+        return str(obj)
+    except:
+        return f"<unserializable {type(obj).__name__}>"
 
 @config_rohden_ai_bp.route('/get_ai_data')
 def get_ai_data():
