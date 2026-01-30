@@ -11,9 +11,18 @@ from ..IA_CORE import (
     delete_chat, update_chat_title, add_favorite, get_favorites, 
     delete_favorite, record_user_query, get_suggestions,
     add_alert, get_alerts, update_alert_status, delete_alert,
-    save_prediction, get_predictions
+    save_prediction, get_predictions, PassiveLearner
 )
+from ..IA_CORE.INTERFACE.chat_processor import ChatProcessor
+from ..IA_CORE.INTERFACE.insight_formatter import InsightFormatter
+
 import traceback
+import threading
+
+# Inicializar o aprendiz passivo e processadores
+passive_learner = PassiveLearner()
+chat_processor = ChatProcessor()
+insight_formatter = InsightFormatter()
 
 # ========================================
 # ROTAS DA PÁGINA
@@ -63,8 +72,83 @@ def rename_chat(chat_id):
 
 @chat_bp.route('/ask', methods=['POST'])
 def ask():
+    """
+    Rota principal da IA (Unificada).
+    Pipeline: ChatProcessor (Decisão Inteligente) -> RAG/SQL/Chat -> InsightFormatter
+    """
+    return process_chat_request()
+
+@chat_bp.route('/new_message', methods=['POST'])
+def new_message():
+    """Alias para /ask para compatibilidade"""
+    return process_chat_request()
+
+def process_chat_request():
     try:
         data = request.json
+        user_message = data.get('message') or data.get('prompt')
+        username = session.get('user_name') or session.get('usuario')
+        chat_id = data.get('chat_id')
+        
+        if not user_message:
+            return jsonify({'error': 'Mensagem vazia'}), 400
+
+        # 1. Processar usando o ChatProcessor (decide se usa SQL ou Chat)
+        result = chat_processor.process_message(user_message)
+        
+        # 2. Formatar resposta humanizada
+        final_text = insight_formatter.format_response(result)
+        
+        # 3. Salvar histórico
+        if chat_id:
+            try:
+                add_message(chat_id, 'user', user_message)
+                # Metadados extras para debug
+                metadata = {
+                    'sql': result.get('generated_sql'),
+                    'row_count': result.get('row_count'),
+                    'error': result.get('error'),
+                    'type': result.get('type')
+                }
+                add_message(chat_id, 'assistant', final_text, metadata=metadata)
+                
+                # Atualizar título se for primeira mensagem
+                # (Lógica simplificada, poderia ser melhorada)
+            except Exception as e:
+                print(f"Erro ao salvar histórico: {e}")
+
+        # Aprendizado Passivo (em background)
+        if username and user_message and final_text:
+            threading.Thread(
+                target=passive_learner.analyze_interaction, 
+                args=(username, user_message, final_text, chat_id),
+                daemon=True
+            ).start()
+
+        return jsonify({
+            'response': final_text,
+            'sql_executed': result.get('generated_sql'),
+            'row_count': result.get('row_count'),
+            'debug_info': {
+                'context_used': result.get('context_used'),
+                'error': result.get('error'),
+                'type': result.get('type')
+            }
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# Antiga rota mantida para fallback temporário, mas renomeada internamente se precisar
+# @chat_bp.route('/ask_legacy', methods=['POST']) ... 
+# Na verdade, vou deixar a /ask original quieta se quiserem usar, 
+# mas vou adicionar a /new_message separada.
+
+@chat_bp.route('/ask_legacy', methods=['POST'])
+def ask_legacy():
+    try:
+        data = request.json
+
         user_message = data.get('prompt') or data.get('message')
         chat_id = data.get('chat_id')
         history = data.get('history', [])
@@ -95,6 +179,14 @@ def ask():
                 title = user_message[:30] + ('...' if len(user_message) > 30 else '')
                 update_chat_title(chat_id, title)
         
+        # Aprendizado Passivo (em background para não travar a resposta)
+        if username and user_message and response_text:
+            threading.Thread(
+                target=passive_learner.analyze_interaction, 
+                args=(username, user_message, response_text, chat_id),
+                daemon=True
+            ).start()
+
         suggestions = get_suggestions(username) if username else []
         
         return jsonify({

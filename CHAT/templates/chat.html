@@ -1443,16 +1443,6 @@
                     <textarea class="input-field" id="inputField" rows="1" placeholder="Digite sua mensagem..."></textarea>
                     <div class="input-actions">
                         <div class="input-tools">
-                            <div class="mode-toggle" id="modeToggle">
-                                <button class="mode-btn active" onclick="setChatMode('chat')" title="Modo Conversa">
-                                    <i class="bi bi-chat-dots"></i>
-                                    <span>Chat</span>
-                                </button>
-                                <button class="mode-btn" onclick="setChatMode('agente')" title="Modo Agente (Empresa)">
-                                    <i class="bi bi-robot"></i>
-                                    <span>Agente</span>
-                                </button>
-                            </div>
                             <button class="tool-btn" onclick="attachFile()" title="Anexar arquivo">
                                 <i class="bi bi-paperclip"></i>
                             </button>
@@ -1528,37 +1518,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const historySidebar = document.getElementById('historySidebar');
     const sidebarOverlay = document.getElementById('sidebarOverlay');
 
-    let currentMode = 'chat';
     let chatId = null;
     let history = [];
     let processing = false;
     let hasMessages = false;
-
-    // Mode Selector
-    window.setChatMode = function(mode) {
-        currentMode = mode;
-        const toggle = document.getElementById('modeToggle');
-        const btns = document.querySelectorAll('.mode-btn');
-        
-        if (mode === 'agente') {
-            toggle.classList.add('agente-active');
-        } else {
-            toggle.classList.remove('agente-active');
-        }
-
-        btns.forEach(btn => {
-            if (btn.getAttribute('onclick').includes(`'${mode}'`)) {
-                btn.classList.add('active');
-            } else {
-                btn.classList.remove('active');
-            }
-        });
-        
-        // Update placeholder based on mode
-        inputField.placeholder = mode === 'chat' 
-            ? 'Converse com o Samuca...' 
-            : 'Pergunte sobre dados da empresa (Modo Agente)...';
-    };
 
     // Load history
     loadHistoryList();
@@ -1614,8 +1577,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 body: JSON.stringify({ 
                     prompt: msg, 
                     chat_id: chatId, 
-                    history: history,
-                    mode: currentMode 
+                    history: history
                 })
             });
             const data = await r.json();

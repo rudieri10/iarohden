@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from ..DATA.storage import DataStorage
 from ..ENGINE.vector_manager import VectorManager
-import requests
+from .ai_client import AIClient
 import os
 
 from .analise_temporal import DataInsightEngine
@@ -18,14 +18,7 @@ class PassiveLearner:
         self.storage = DataStorage()
         self.vector_manager = VectorManager()
         self.data_engine = DataInsightEngine()
-        self.ai_url = os.getenv("ROHDEN_AI_INTERNAL_URL", "http://192.168.1.217:11434/api/generate")
-        
-        self.session = requests.Session()
-        self.session.trust_env = False
-        self.session.headers.update({
-            "Content-Type": "application/json",
-            "Connection": "keep-alive"
-        })
+        self.ai_client = AIClient()
         
         self.correction_triggers = [
             r"não é (isso|assim|bem isso)",
@@ -79,20 +72,14 @@ Categorias: Regra, Preferência, Termo, Correção.
 Retorne APENAS JSON: [{{"category": "...", "content": "...", "importance": 1-5, "is_correction": bool}}]"""
 
         try:
-            payload = {
-                "model": "llama3.1-gguf",
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.1}
-            }
-            res = self.session.post(self.ai_url, json=payload, timeout=30)
-            if res.status_code == 200:
-                text = res.json().get("response", "")
-                match = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
-                return json.loads(match.group(0)) if match else []
+            result = self.ai_client.generate_json(prompt)
+            if isinstance(result, list):
+                return result
+            # Se retornou um dict, verificamos se tem uma chave 'response' ou similar que contenha a lista
+            # Mas o generate_json já tenta retornar o objeto parseado.
+            return []
         except:
-            pass
-        return []
+            return []
 
     def _validate_fact_against_data(self, fact):
         """Validação básica via DataInsightEngine"""

@@ -1,4 +1,5 @@
 import json
+import re
 from .profiler import TrainingProfiler, ProcessProfiler
 from ..DATA.storage import DataStorage
 from ..ENGINE.vector_manager import VectorManager
@@ -21,7 +22,9 @@ class TableTrainer:
         """
         def update_p(msg, percent):
             if progress_callback:
-                progress_callback(percent, msg)
+                # Mapeia 5-100 do trainer para 20-95 do fluxo global
+                adjusted_percent = 20 + int((percent / 100) * 75)
+                progress_callback(adjusted_percent, msg)
 
         print(f"Iniciando treinamento IA para {table_name}...")
         update_p(f"Analisando estrutura de {table_name}...", 5)
@@ -54,7 +57,14 @@ class TableTrainer:
             intel = col_data.get('intelligence', {})
             samples = col_data.get('samples', [])
             
-            col_info = f"- COLUNA: {col_name} ({intel.get('classification', 'DADO')})"
+            # Buscar FK target nos metadados originais das colunas
+            fk_info = ""
+            for original_col in columns:
+                if original_col['name'] == col_name and original_col.get('fk_target'):
+                    fk_info = f" | RELACIONA COM: {original_col['fk_target']}"
+                    break
+
+            col_info = f"- COLUNA: {col_name} ({intel.get('classification', 'DADO')}){fk_info}"
             if intel.get('business_purpose'):
                 col_info += f" | FIM: {intel['business_purpose']}"
             
@@ -65,14 +75,24 @@ class TableTrainer:
             semantic_parts.append(col_info)
 
         if profile.get('table_insights'):
-            semantic_parts.append("INSIGHTS DE NEGÓCIO: " + " ".join(profile['table_insights']))
+            # Garantir que todos os insights sejam strings (podem vir como dicts da IA)
+            insights_text = []
+            for i in profile['table_insights']:
+                if isinstance(i, dict):
+                    # Se for dict, tenta pegar 'insight' ou 'description' ou converte pra JSON
+                    insights_text.append(i.get('insight', i.get('description', json.dumps(i, ensure_ascii=False))))
+                else:
+                    insights_text.append(str(i))
+            semantic_parts.append("INSIGHTS DE NEGÓCIO: " + " ".join(insights_text))
             
         if profile.get('business_rules'):
-            # Extrair texto das regras se forem dicionários
+            # Extrair texto das regras se forem dicionários (Tratamento Robusto)
             rules_text = []
             for r in profile['business_rules']:
                 if isinstance(r, dict):
-                    rules_text.append(r.get('rule', str(r)))
+                    # Tenta pegar 'rule', 'description' ou 'suggested_rule'
+                    rule_str = r.get('rule', r.get('description', r.get('suggested_rule', json.dumps(r, ensure_ascii=False))))
+                    rules_text.append(rule_str)
                 else:
                     rules_text.append(str(r))
             semantic_parts.append("REGRAS DETECTADAS: " + " ".join(rules_text))
@@ -90,7 +110,8 @@ class TableTrainer:
 
         for i, text in enumerate(texts_to_try):
             try:
-                update_p(f"Vetorizando base de dados (Tentativa {i+1}/3)...", 25 + (i*5))
+                text_size = len(text)
+                update_p(f"Vetorizando base ({text_size} chars) (T{i+1}/3)...", 25 + (i*5))
                 vector = self.vector_manager.generate_embedding(text)
                 if vector:
                     vector_blob = self.vector_manager.vector_to_blob(vector)
@@ -104,8 +125,9 @@ class TableTrainer:
                 time.sleep(5)
         
         if not vector_success:
-            raise Exception(f"ERRO: Falha na vetorização de {table_name}.")
-
+            print(f"⚠️ AVISO: Falha na vetorização de {table_name}. A busca semântica para esta tabela estará limitada.")
+            # Não lançamos mais exceção para permitir que o treinamento salve os metadados estatísticos
+        
         update_p("Salvando metadados enriquecidos...", 45)
         
         # 4. Preparar metadados enriquecidos
@@ -121,6 +143,7 @@ class TableTrainer:
                     'semantic_type': intel.get('classification'),
                     'business_purpose': intel.get('business_purpose'),
                     'detected_rules': intel.get('detected_rules', []),
+                    'fk_target': col.get('fk_target'), # Preservar FK target nos metadados
                     'examples': col_profile.get('samples', [])[:15]
                 })
             enriched_columns.append(enriched_col)
@@ -141,16 +164,44 @@ class TableTrainer:
         
         self.storage.save_tables([table_meta])
         
-        # VALIDAÇÃO AUTOMÁTICA DE REGRAS DE NEGÓCIO
+        # VALIDAÇÃO AUTOMÁTICA DE REGRAS DE NEGÓCIO COM AUTO-CURA
         if profile.get('business_rules'):
             try:
+                import asyncio
                 from .rule_validator import RuleValidator
                 print(f"\n🔍 Validando {len(profile['business_rules'])} regras de negócio...")
                 validator = RuleValidator()
-                validated_rules = validator.validate_table_rules(
-                    table_name, 
-                    profile['business_rules']
-                )
+                
+                # Validar cada regra com auto-cura
+                validated_rules = []
+                for rule in profile['business_rules']:
+                    try:
+                        # Usar o método com auto-cura (async)
+                        result = asyncio.run(validator.validate_rule_with_healing(table_name, rule))
+                        
+                        if result.status == "success":
+                            print(f"   ✓ Regra validada: \"{rule.get('description', 'Sem descrição')}\" (100.0% confiança)")
+                        elif result.status == "partial":
+                            print(f"   ⚠ Regra parcial: \"{rule.get('description', 'Sem descrição')}\" ({result.exceptions} exceções)")
+                        elif result.status == "syntax_error":
+                            print(f"   ❌ Erro de sintaxe: \"{rule.get('description', 'Sem descrição')}\" - {result.message}")
+                        else:
+                            print(f"   ⚠ Regra não parseável: \"{rule.get('description', 'Sem descrição')}\"")
+                            
+                        validated_rules.append({
+                            'rule': rule,
+                            'result': result.__dict__
+                        })
+                        
+                    except Exception as e:
+                        print(f"   ❌ Erro ao validar regra: {e}")
+                        validated_rules.append({
+                            'rule': rule,
+                            'error': str(e)
+                        })
+                
+                # Atualizar perfil com regras validadas
+                profile['validated_rules'] = validated_rules
                 # Atualizar metadados com regras validadas
                 table_meta['validated_rules'] = validated_rules
                 self.storage.save_table_metadata(table_name, table_meta)
@@ -167,18 +218,33 @@ class TableTrainer:
             'summary': advanced_description
         }
 
-    def train_processes(self):
+    def train_processes(self, progress_callback=None):
         """
         Analisa o banco de dados como um todo para descobrir fluxos de processos.
         Deve ser chamado após o treinamento individual das tabelas.
         """
+        def update_p(msg, percent):
+            if progress_callback:
+                progress_callback(percent, msg)
+
         print("Iniciando treinamento de PROCESSOS e FLUXOS...")
+        update_p("Carregando metadados globais...", 98)
         
-        # 1. Carregar metadados das tabelas já treinadas
-        tables_meta = self.storage.load_tables()
+        # 1. Carregar metadados das tabelas já treinadas (sem embeddings para ser rápido)
+        tables_meta = self.storage.load_tables(include_embeddings=False)
         
+        if not tables_meta:
+            print("Nenhuma tabela treinada encontrada para mapear fluxos.")
+            return {'success': False, 'message': 'Nenhuma tabela encontrada'}
+
         # 2. Descobrir fluxos e relacionamentos
-        discovery = self.process_profiler.discover_flow(tables_meta)
+        try:
+            update_p("Mapeando fluxos e relacionamentos entre tabelas via IA...", 99)
+            discovery = self.process_profiler.discover_flow(tables_meta)
+        except Exception as e:
+            print(f"⚠️ Erro ao descobrir fluxos: {e}")
+            discovery = {"flow": [], "relationships": [], "cascades": [], "movements": [], "table_info": {}}
+        
         flow = discovery.get('flow', [])
         relationships = discovery.get('relationships', [])
         cascades = discovery.get('cascades', [])
@@ -193,27 +259,31 @@ class TableTrainer:
             if rules:
                 business_rules[meta['table_name']] = rules
 
-        timing_insights = self.process_profiler.analyze_timing(flow, None)
-        
-        # 3. Gerar resumo do processo (Incluindo relacionamentos, cascatas, histórico, regras e fluxos)
-        process_summary = self.process_profiler.generate_process_summary(
-            "Ciclo Comercial Rohden", 
-            flow, 
-            timing_insights, 
-            relationships,
-            cascades,
-            table_info,
-            business_rules,
-            movements
-        )
-        
-        # 4. Salvar o fluxo descoberto
-        self.storage.save_process_flow(
-            "Ciclo Comercial Rohden",
-            flow,
-            timing_insights,
-            process_summary
-        )
+        try:
+            timing_insights = self.process_profiler.analyze_timing(flow, None)
+            
+            # 3. Gerar resumo do processo (Incluindo relacionamentos, cascatas, histórico, regras e fluxos)
+            process_summary = self.process_profiler.generate_process_summary(
+                "Ciclo Comercial Rohden", 
+                flow, 
+                timing_insights, 
+                relationships,
+                cascades,
+                table_info,
+                business_rules,
+                movements
+            )
+            
+            # 4. Salvar o fluxo descoberto
+            self.storage.save_process_flow(
+                "Ciclo Comercial Rohden",
+                flow,
+                timing_insights,
+                process_summary
+            )
+        except Exception as e:
+            print(f"⚠️ Erro ao processar resumo de fluxos: {e}")
+            return {'success': False, 'error': str(e)}
         
         return {
             'success': True,

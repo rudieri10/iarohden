@@ -16,12 +16,26 @@ class VectorManager:
     
     def __init__(self):
         self.ai_url = os.getenv("ROHDEN_AI_URL")
-        self.ai_url_internal = os.getenv("ROHDEN_AI_INTERNAL_URL")
+        self.ai_url_internal = os.getenv("ROHDEN_AI_INTERNAL_URL", "http://192.168.1.217:11434")
         self.api_key = os.getenv("ROHDEN_AI_KEY", "ROHDEN_AI_SECRET_2024")
         self.headers = {
             'X-ROHDEN-AI-KEY': self.api_key,
             'Content-Type': 'application/json'
         }
+
+    def get_embedding_dimension(self) -> int:
+        """Retorna a dimensão do embedding gerado pelo modelo atual."""
+        # Tenta pegar do cache
+        if self._embedding_cache:
+            return len(next(iter(self._embedding_cache.values())))
+        
+        # Tenta gerar um pequeno embedding para teste
+        test_vector = self.generate_embedding("test")
+        if test_vector:
+            return len(test_vector)
+        
+        # Fallback padrão (geralmente 1024 ou 2048)
+        return 2048 # Qwen 2.5 3B costuma usar 2048 ou 1536 dependendo da versão, mas o erro diz que veio 2048
 
     def generate_embedding(self, text: str) -> Optional[List[float]]:
         """Gera um vetor numérico (embedding) para o text usando o servidor Rohden AI."""
@@ -87,7 +101,7 @@ class VectorManager:
                             "encoding_format": "float"
                         }
                         
-                    timeout = 5 if '192.168' in emb_url or 'localhost' in emb_url else 10
+                    timeout = 60 if '192.168' in emb_url or 'localhost' in emb_url else 70
                     
                     response = requests.post(emb_url, json=payload, headers=self.headers, timeout=timeout)
                     

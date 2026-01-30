@@ -9,10 +9,16 @@ import os
 from contextlib import contextmanager
 from typing import Generator
 
-# Adicionar o diretório raiz ao path para importar conecxaodb
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../')))
+# Adicionar o diretório raiz e infra ao path para importar conecxaodb
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../'))
+sys.path.append(root_dir)
+sys.path.append(os.path.join(root_dir, 'sys_backend', 'infra'))
+
 try:
-    from conecxaodb import get_connection
+    try:
+        from conecxaodb import get_connection
+    except ImportError:
+        from sys_backend.infra.conecxaodb import get_connection
 except ImportError:
     # Fallback para o caso de não encontrar o conecxaodb
     def get_connection():

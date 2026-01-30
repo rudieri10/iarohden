@@ -1,6 +1,0 @@
-__pycache__/
-*.pyc
-*.db
-.env
-.vscode/
-IA_CORE/DATA/rohden_ai.db

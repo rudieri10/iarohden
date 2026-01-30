@@ -1,10 +1,36 @@
 import os
+import sys
 import requests
 import json
 import re
 import random
 from typing import Any, Dict, List, Optional, Tuple
-from conecxaodb import get_connection
+
+# Adicionar o diretório raiz e infra ao path para importar conecxaodb
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../'))
+sys.path.append(root_dir)
+sys.path.append(os.path.join(root_dir, 'sys_backend', 'infra'))
+
+try:
+    try:
+        from conecxaodb import get_connection
+    except ImportError:
+        from sys_backend.infra.conecxaodb import get_connection
+except ImportError:
+    # Fallback para o caso de não encontrar o conecxaodb
+    def get_connection():
+        import cx_Oracle
+        ip = '192.168.1.253'
+        porta = 1521
+        service_name = 'rohden'
+        usuario_oracle = 'SYSROH'
+        senha_oracle = 'rohden'
+        dsn_tns = cx_Oracle.makedsn(ip, porta, service_name=service_name)
+        try:
+            return cx_Oracle.connect(user=usuario_oracle, password=senha_oracle, dsn=dsn_tns)
+        except:
+            return None
+
 from ..MEMORIA import memoria_system
 from .sql_builder import SQLBuilder
 from .vector_manager import VectorManager
@@ -104,9 +130,9 @@ class LlamaEngine:
             
             # Configuração do Motor Principal (Rohden AI Server)
             cls._instance.ai_url = os.getenv("ROHDEN_AI_URL")
-            cls._instance.ai_url_internal = os.getenv("ROHDEN_AI_INTERNAL_URL")
-            cls._instance.ai_model = os.getenv("ROHDEN_AI_MODEL")
-            cls._instance.api_key = os.getenv("ROHDEN_AI_KEY")
+            cls._instance.ai_url_internal = os.getenv("ROHDEN_AI_INTERNAL_URL", "http://192.168.1.217:11434/api/generate")
+            cls._instance.ai_model = os.getenv("ROHDEN_AI_MODEL", "qwen2.5:3b")
+            cls._instance.api_key = os.getenv("ROHDEN_AI_KEY", "ROHDEN_AI_SECRET_2024")
             
             # Headers para o Servidor Rohden
             cls._instance.rohden_headers = {

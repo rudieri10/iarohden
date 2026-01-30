@@ -4,8 +4,10 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+from ..DATA.storage import db_path as STORAGE_DB_PATH
+
 # Caminho para o banco de dados local (mesmo usado no storage.py)
-DB_PATH = Path(os.path.dirname(__file__)).parent / "DATA" / "ai_storage.db"
+DB_PATH = Path(STORAGE_DB_PATH)
 
 def get_db_connection():
     """Obtém uma conexão com o SQLite"""

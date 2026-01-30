@@ -8,27 +8,47 @@ from datetime import datetime
 import threading
 
 # Importar o storage da IA Core
+storage = None
+llama_engine = None
+trainer = None
+observer = None  # Novo Observer
+
 try:
     from SETORES_MODULOS.ROHDEN_AI.IA_CORE.DATA.storage import DataStorage
-    storage = DataStorage()
     from SETORES_MODULOS.ROHDEN_AI.IA_CORE.ENGINE.ai_engine import get_llama_engine
-    llama_engine = get_llama_engine()
     from SETORES_MODULOS.ROHDEN_AI.IA_CORE.TRAINING.trainer import TableTrainer
-    trainer = TableTrainer()
-except ImportError:
-    # Fallback caso o caminho de importação seja diferente
-    from ..IA_CORE.DATA.storage import DataStorage
+    from ..IA_CORE.PIPELINE.observer import Observer  # Importação do novo Observer
+    
     storage = DataStorage()
-    from ..IA_CORE.ENGINE.ai_engine import get_llama_engine
     llama_engine = get_llama_engine()
-    from ..IA_CORE.TRAINING.trainer import TableTrainer
     trainer = TableTrainer()
+    observer = Observer()  # Inicialização
+    # Injetar o mesmo storage no trainer para evitar múltiplas conexões ChromaDB
+    trainer.storage = storage
+    
+except Exception as e:
+    print(f"⚠️ Erro ao carregar módulos IA Core (tentando fallback): {e}")
+    try:
+        from ..IA_CORE.DATA.storage import DataStorage
+        from ..IA_CORE.ENGINE.ai_engine import get_llama_engine
+        from ..IA_CORE.TRAINING.trainer import TableTrainer
+        from ..IA_CORE.PIPELINE.observer import Observer
+        
+        storage = DataStorage()
+        llama_engine = get_llama_engine()
+        trainer = TableTrainer()
+        observer = Observer()
+        trainer.storage = storage
+    except Exception as e2:
+        print(f"❌ Erro crítico ao carregar IA Core: {e2}")
 
 # Exportação para o IP do servidor (UNC Path)
 AI_DATA_EXPORT_DIR = r'\\192.168.1.217\c$\IA\dados ia' 
 
-# Armazenamento global temporário para progresso de treinamento
+# Variáveis globais para controle de treinamento
 training_progress = {}
+process_training_lock = threading.Lock()
+last_process_training_time = 0
 
 @config_rohden_ai_bp.route('/training_status')
 def get_all_training_status():
@@ -98,8 +118,17 @@ def get_oracle_tables():
               AND table_name NOT LIKE 'TEMP_%'
             ORDER BY table_name
         """
-        cursor.execute(query)
-        tables = [row[0] for row in cursor.fetchall()]
+        
+        # Hook do Observer
+        if observer:
+            with observer.observe_query(query) as ctx:
+                cursor.execute(query)
+                tables = [row[0] for row in cursor.fetchall()]
+                ctx.row_count = len(tables)
+        else:
+            cursor.execute(query)
+            tables = [row[0] for row in cursor.fetchall()]
+            
         return jsonify({'tables': tables})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -154,6 +183,14 @@ def process_table():
     if not schema_name:
         schema_name = 'SYSROH'
 
+    # Registrar no monitor local (para a UI)
+    training_progress[table_name] = {
+        'percent': 0,
+        'status': 'Iniciando...',
+        'remaining': 0,
+        'done': False
+    }
+
     # Iniciar treinamento em segundo plano
     thread = threading.Thread(target=run_background_training, args=(table_name, schema_name))
     thread.daemon = True
@@ -166,32 +203,51 @@ def process_table():
 
 def run_background_training(table_name, schema_name):
     """Executa o treinamento em uma thread separada para não bloquear o servidor"""
-    def update_progress(percent, msg, remaining=0):
+    print(f"🚀 Iniciando thread de treinamento para {schema_name}.{table_name}")
+    
+    def update_progress(percent, msg, remaining=0, done=False):
         training_progress[table_name] = {
             'percent': percent,
             'status': msg,
             'remaining': remaining,
-            'done': False
+            'done': done
         }
 
     try:
-        update_progress(0, "Conectando ao Oracle...")
+        if trainer is None or storage is None:
+            update_progress(0, "Erro: Sistema de IA não inicializado. Verifique os logs do servidor.")
+            print(f"❌ Abortando treino: trainer={trainer}, storage={storage}")
+            return
+
+        update_progress(1, "Conectando ao Oracle...")
         conn = get_connection()
         if not conn:
-            update_progress(0, "Erro: Falha na conexão com o banco")
+            update_progress(0, "Erro: Falha na conexão com o banco (Oracle Offline?)")
             return
             
         cursor = conn.cursor()
         
         # 0. Buscar contagem total
         full_table_name = f'"{schema_name}"."{table_name}"'
-        update_progress(5, f"Contando registros em {table_name}...")
-        cursor.execute(f'SELECT COUNT(*) FROM {full_table_name}')
-        total_records = cursor.fetchone()[0]
+        update_progress(5, f"Validando tabela {table_name}...")
+        
+        try:
+            count_query = f'SELECT COUNT(*) FROM {full_table_name}'
+            if observer:
+                with observer.observe_query(count_query) as ctx:
+                    cursor.execute(count_query)
+                    total_records = cursor.fetchone()[0]
+                    ctx.row_count = 1
+            else:
+                cursor.execute(count_query)
+                total_records = cursor.fetchone()[0]
+        except Exception as e:
+            update_progress(0, f"Erro ao acessar tabela: {str(e)}")
+            return
         
         # 1. Buscar metadados
-        update_progress(10, "Lendo estrutura da tabela...")
-        cursor.execute(f"""
+        update_progress(10, "Lendo estrutura e relacionamentos...")
+        meta_query = """
             SELECT 
                 cols.column_name, 
                 cols.data_type, 
@@ -200,7 +256,15 @@ def run_background_training(table_name, schema_name):
                 (SELECT 'Y' FROM all_cons_columns acc 
                  JOIN all_constraints ac ON acc.constraint_name = ac.constraint_name 
                  WHERE acc.table_name = cols.table_name AND acc.column_name = cols.column_name 
-                 AND ac.constraint_type = 'P' AND acc.owner = cols.owner) as is_pk
+                 AND ac.constraint_type = 'P' AND acc.owner = cols.owner) as is_pk,
+                -- Buscar Foreign Keys (Relacionamentos)
+                (SELECT r_ac.table_name || '.' || r_acc.column_name
+                 FROM all_cons_columns acc 
+                 JOIN all_constraints ac ON acc.constraint_name = ac.constraint_name 
+                 JOIN all_constraints r_ac ON ac.r_constraint_name = r_ac.constraint_name
+                 JOIN all_cons_columns r_acc ON r_ac.constraint_name = r_acc.constraint_name
+                 WHERE acc.table_name = cols.table_name AND acc.column_name = cols.column_name 
+                 AND ac.constraint_type = 'R' AND acc.owner = cols.owner AND ROWNUM = 1) as fk_target
             FROM all_tab_columns cols
             LEFT JOIN all_col_comments coms 
                 ON cols.owner = coms.owner 
@@ -208,16 +272,26 @@ def run_background_training(table_name, schema_name):
                 AND cols.column_name = coms.column_name
             WHERE cols.owner = :owner_name AND cols.table_name = :tbl_name
             ORDER BY cols.column_id
-        """, {'owner_name': schema_name.upper(), 'tbl_name': table_name.upper()})
+        """
+        
+        if observer:
+            with observer.observe_query(meta_query) as ctx:
+                cursor.execute(meta_query, {'owner_name': schema_name.upper(), 'tbl_name': table_name.upper()})
+                columns_rows = cursor.fetchall()
+                ctx.row_count = len(columns_rows)
+        else:
+            cursor.execute(meta_query, {'owner_name': schema_name.upper(), 'tbl_name': table_name.upper()})
+            columns_rows = cursor.fetchall()
         
         columns_info = []
-        for row in cursor.fetchall():
+        for row in columns_rows:
             columns_info.append({
                 'name': row[0],
                 'type': row[1],
-                'nullable': row[2],
-                'comment': row[3] if row[3] else '',
-                'is_pk': row[4] == 'Y'
+                'nullable': row[2] == 'Y',
+                'comments': row[3] if row[3] else '',
+                'is_pk': row[4] == 'Y',
+                'fk_target': row[5]  # Novo campo: Tabela.Coluna de destino
             })
             
         # 2. Amostragem
@@ -230,10 +304,19 @@ def run_background_training(table_name, schema_name):
             sample_percent = max(round((target_sample / total_records) * 100, 2), 0.01)
             sample_query = f'SELECT * FROM (SELECT * FROM {full_table_name} SAMPLE({sample_percent})) WHERE ROWNUM <= {target_sample}'
         
-        cursor.execute(sample_query)
-        cols = [col[0] for col in cursor.description]
+        if observer:
+            with observer.observe_query(sample_query) as ctx:
+                cursor.execute(sample_query)
+                cols = [col[0] for col in cursor.description]
+                sample_data_rows = cursor.fetchall()
+                ctx.row_count = len(sample_data_rows)
+        else:
+            cursor.execute(sample_query)
+            cols = [col[0] for col in cursor.description]
+            sample_data_rows = cursor.fetchall()
+
         sample_rows = []
-        for row in cursor.fetchall():
+        for row in sample_data_rows:
             row_dict = {}
             for i, val in enumerate(row):
                 if hasattr(val, 'isoformat'):
@@ -251,18 +334,36 @@ def run_background_training(table_name, schema_name):
         update_progress(95, "Sincronizando dados com o servidor de IA...")
         export_success = True
         
-        # Finalizar
-        update_progress(100, "Concluído!", 0)
-        training_progress[table_name]['done'] = True
+        # 5. Atualizar fluxos globais (Mapeamento de Próximo Nível)
+        global last_process_training_time
+        import time
+        now = time.time()
         
-        # Atualizar metadados
+        # Se conseguirmos o lock, rodamos o mapeamento global como parte do progresso
+        if process_training_lock.acquire(blocking=False):
+            try:
+                # Cooldown de 60 segundos para não sobrecarregar a IA
+                if now - last_process_training_time > 60:
+                    update_progress(98, "Subindo de nível: Mapeando fluxos globais e relacionamentos...")
+                    trainer.train_processes(progress_callback=update_progress) 
+                    last_process_training_time = now
+                else:
+                    update_progress(98, "Mapeamento global recente, pulando otimização...")
+            except Exception as pe:
+                print(f"Erro no mapeamento global: {pe}")
+            finally:
+                process_training_lock.release()
+        else:
+            update_progress(98, "Mapeamento global já em execução por outra tarefa...")
+        
+        # Finalizar treinamento da tabela
+        update_progress(100, "Concluído!", 0, done=True)
+
+        # Atualizar metadados finais
         current_meta = storage.get_table_metadata(table_name)
         if current_meta:
             current_meta['export_status'] = "Sucesso" if export_success else "Erro na exportação"
             storage.save_tables([current_meta])
-            
-        # Atualizar fluxos
-        trainer.train_processes()
 
     except Exception as e:
         update_progress(0, f"Erro: {str(e)}")

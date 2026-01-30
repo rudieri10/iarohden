@@ -5,6 +5,9 @@ Configurações de conexão com o banco Oracle principal
 
 import cx_Oracle
 import logging
+from ..IA_CORE.PIPELINE.observer import Observer
+
+observer = Observer()
 
 # Configurações do Banco Principal
 DATABASE_CONFIG = {
@@ -94,8 +97,11 @@ def get_tables_from_schema(schema_name):
             ORDER BY table_name
             """
             
-            cursor.execute(query, {'schema_name': schema_name})
-            tables = [row[0] for row in cursor.fetchall()]
+            # Observer Hook
+            with observer.observe_query(query) as ctx:
+                cursor.execute(query, {'schema_name': schema_name})
+                tables = [row[0] for row in cursor.fetchall()]
+                ctx.row_count = len(tables)
             
         except cx_Oracle.Error as error:
             logging.error(f"Erro ao listar tabelas do schema {schema_name}: {error}")
