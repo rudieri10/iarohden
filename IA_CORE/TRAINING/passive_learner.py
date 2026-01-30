@@ -4,6 +4,7 @@ from datetime import datetime
 from ..DATA.storage import DataStorage
 from ..ENGINE.vector_manager import VectorManager
 from .ai_client import AIClient
+from ..INTERFACE.feedback_analyzer import FeedbackAnalyzer
 import os
 
 from .analise_temporal import DataInsightEngine
@@ -19,21 +20,21 @@ class PassiveLearner:
         self.vector_manager = VectorManager()
         self.data_engine = DataInsightEngine()
         self.ai_client = AIClient()
+        self.feedback_analyzer = FeedbackAnalyzer()
         
-        self.correction_triggers = [
-            r"não é (isso|assim|bem isso)",
-            r"(na verdade|de fato|o correto é|na realidade)",
-            r"você errou",
-            r"está errado",
-            r"corrigindo",
-            r"mude para",
-            r"prefiro que"
-        ]
-
     def analyze_interaction(self, user_name, user_query, ai_response, chat_id=None):
         """Analisa a interação para aprendizado evolutivo."""
         learned_facts = []
-        is_correction = any(re.search(pattern, user_query.lower()) for pattern in self.correction_triggers)
+        
+        # Analisa feedback/sentimento
+        feedback = self.feedback_analyzer.analyze_user_response(user_query)
+        is_correction = feedback['sentiment'] == 'negative'
+        is_positive = feedback['sentiment'] == 'positive'
+        
+        # Se for apenas um agradecimento ou feedback curto, ignorar extração complexa
+        if is_positive and len(user_query.split()) < 5:
+            return []
+
         potential_score = self._evaluate_knowledge_potential(user_query, ai_response, is_correction)
         
         if potential_score > 0.4:

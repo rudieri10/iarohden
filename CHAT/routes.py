@@ -93,8 +93,17 @@ def process_chat_request():
         if not user_message:
             return jsonify({'error': 'Mensagem vazia'}), 400
 
-        # 1. Processar usando o ChatProcessor (decide se usa SQL ou Chat)
-        result = chat_processor.process_message(user_message)
+        # Recuperar histórico se existir chat_id
+        chat_history = []
+        if chat_id:
+            try:
+                chat_history = get_chat_messages(chat_id)
+            except Exception as e:
+                print(f"⚠️ Erro ao recuperar histórico: {e}")
+
+        # 1. Processar usando o ChatProcessor (decide se usa SQL, Chat, Suporte, etc.)
+        # Agora passando username e histórico para contexto completo
+        result = chat_processor.process_message(user_message, username=username, chat_history=chat_history)
         
         # 2. Formatar resposta humanizada
         final_text = insight_formatter.format_response(result)
@@ -103,36 +112,47 @@ def process_chat_request():
         if chat_id:
             try:
                 add_message(chat_id, 'user', user_message)
-                # Metadados extras para debug
+                # Metadados extras para debug e análise futura
                 metadata = {
                     'sql': result.get('generated_sql'),
                     'row_count': result.get('row_count'),
                     'error': result.get('error'),
-                    'type': result.get('type')
+                    'type': result.get('type'),
+                    'intent': result.get('intent'),
+                    'confidence': result.get('confidence'),
+                    'intent_method': result.get('intent_method')
                 }
                 add_message(chat_id, 'assistant', final_text, metadata=metadata)
                 
-                # Atualizar título se for primeira mensagem
-                # (Lógica simplificada, poderia ser melhorada)
             except Exception as e:
                 print(f"Erro ao salvar histórico: {e}")
 
-        # Aprendizado Passivo (em background)
+        # Aprendizado Passivo e Logging de Intenção (em background)
         if username and user_message and final_text:
             threading.Thread(
                 target=passive_learner.analyze_interaction, 
                 args=(username, user_message, final_text, chat_id),
                 daemon=True
             ).start()
+            
+            # Log de intenção para análise (simples print por enquanto, poderia ser DB)
+            if result.get('intent'):
+                print(f"🎯 [INTENT_LOG] User: {username} | Intent: {result.get('intent')} ({result.get('confidence')}) | Chat: {chat_id}")
 
         return jsonify({
             'response': final_text,
             'sql_executed': result.get('generated_sql'),
             'row_count': result.get('row_count'),
+            'intent': result.get('intent'), # Retorna intenção para o frontend
             'debug_info': {
                 'context_used': result.get('context_used'),
                 'error': result.get('error'),
-                'type': result.get('type')
+                'type': result.get('type'),
+                'intent_details': {
+                    'intent': result.get('intent'),
+                    'confidence': result.get('confidence'),
+                    'method': result.get('intent_method')
+                }
             }
         })
     except Exception as e:

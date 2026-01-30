@@ -69,14 +69,23 @@ class AIClient:
             logger.error(f"Erro AI (JSON): {e}")
             return {}
 
-    def generate_text(self, prompt: str, timeout: int = 60) -> str:
+    def generate_text(self, prompt: str, timeout: int = 60, **kwargs) -> str:
         """Gera resposta texto simples."""
         try:
+            # Opções padrão
+            ai_options = {"temperature": 0.3}
+            
+            # Atualiza com options passadas nos kwargs ou argumentos específicos
+            if 'options' in kwargs:
+                ai_options.update(kwargs['options'])
+            if 'temperature' in kwargs:
+                ai_options['temperature'] = kwargs['temperature']
+
             payload = {
                 "model": self.ai_model,
                 "prompt": prompt,
                 "stream": False,
-                "options": {"temperature": 0.3}
+                "options": ai_options
             }
             
             response = self.session.post(self.ai_url, json=payload, timeout=timeout)
